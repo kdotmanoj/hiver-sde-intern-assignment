@@ -29,8 +29,14 @@ from dotenv import load_dotenv
 # A real environment variable beats .env, so CI and one-off overrides work.
 load_dotenv(override=False)
 
-# Where cache records live. Module-level so tests can repoint it at a tmp dir.
-CACHE_DIR = Path("data/cache/llm")
+# Repo root, derived from this file's location: src/llm.py -> src -> repo root.
+# Anchoring here means the cache is the same directory whether a script is run
+# from the repo root, from scripts/, or from anywhere else.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Where cache records live. Read through _cache_path() at call time, so tests
+# can repoint it at a tmp dir with monkeypatch.setattr(llm, "CACHE_DIR", ...).
+CACHE_DIR = REPO_ROOT / "data" / "cache" / "llm"
 
 # Generation settings are deliberately NOT part of the cache key: they are fixed
 # for the whole project. If one of these ever changes, the cache is stale by

@@ -7,10 +7,15 @@ not by a mock quietly returning a value.
 """
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from src import llm
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +77,25 @@ def no_sleep(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+
+
+def test_cache_dir_is_anchored_to_repo_root_not_cwd(tmp_path):
+    """CACHE_DIR must come from llm.py's own location, not the working directory.
+
+    Run in a subprocess from an unrelated cwd: the autouse fixture repoints
+    CACHE_DIR for every other test, so the real value can only be observed in a
+    fresh interpreter.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", "from src import llm; print(llm.CACHE_DIR)"],
+        cwd=tmp_path,
+        env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert Path(result.stdout.strip()) == REPO_ROOT / "data" / "cache" / "llm"
 
 
 def test_cache_hit_makes_no_network_call(monkeypatch):

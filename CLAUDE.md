@@ -37,6 +37,7 @@
 - Do not write or modify anything in data/golden/. Those labels are mine.
 - Do not name or define the intent taxonomy. I do that after reading clusters.
 - Do not write report.md or decisions.md prose. You may format; I write the claims.
+- Never run git commands. I handle all commits and pushes.
 
 ## Workflow
 - Use plan mode for anything touching more than one file. Show me the plan first.
@@ -52,7 +53,7 @@
   ## Model stack (fixed — do not substitute without asking)
 - Embeddings: local sentence-transformers all-MiniLM-L6-v2. Never an API.
   Cache vectors to data/cache/embeddings/ as .npy.
-- Generator + classifier: Gemini Flash-tier via AI Studio free key.
+- Generator + classifier: gemini-3.6-flash via AI Studio free key.
   ~15 RPM. Min 4s gap between live calls, exponential backoff on 429.
 - Judge: Groq openai/gpt-oss-120b. 30 RPM, 8K TPM, 200K TPD.
   TPD is our tightest constraint — keep judge prompts under ~500 tokens
@@ -61,3 +62,4 @@
 - Environment: pandas 3.0.5 (copy-on-write default), numpy 2.4, Python 3.11.
   Do not write pandas 2.x-era workarounds. If unsure whether an API
   changed in pandas 3, check rather than assume.
+
