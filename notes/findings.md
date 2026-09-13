@@ -184,3 +184,54 @@ French.
 downward: replies like "let's work together in dm here: `<url>`" survive at 4
 residual words, and form-fill redirects ("please fill in this form: `<url>`")
 are not in the pattern set.
+
+## Add to "Identifiers and text"
+ 
+**Spotify agent signatures are more common than a naive probe suggests.** 40,766
+of the SpotifyCares replies carry a trailing `/XX`: 39,851 two-letter and 915
+one-letter. An initial probe counting only end-of-text occurrences found 31,465,
+missing the 9,752 that sit immediately before a trailing `https://t.co/...`.
+ 
+32 merged replies are signed by more than one agent, meaning a split reply was
+finished by a different person than started it.
+ 
+## Add a new section: "The SpotifyCares working set"
+ 
+28,380 conversations where SpotifyCares authored at least one outbound tweet;
+28,326 after dropping the 54 over 20 tweets. 91,827 tweets, 89,054 after the cap,
+87,677 turns after merging.
+ 
+**Multi-part replies are siblings, not self-reply chains.** Of 1,483 adjacent
+same-author outbound pairs: 1,359 share a parent, 17 are parent-to-child, 106 are
+neither (a brand replying to two different customers under one broadcast). Sibling
+groups: 1,408 pairs, 31 triples, 2 quads.
+ 
+**1,345 groups actually merged, across 1,290 conversations (4.55%).** This is
+lower than the 1,441 sibling sets that exist, because 115 of those sets have a
+customer tweet falling between the parts in time, so the parts are not consecutive
+and correctly do not merge. Decomposes exactly: 1,327 sibling-shaped + 17 chain +
+1 mixed.
+ 
+**Zero groups needed re-ordering by part marker.** Across 1,258 fully-marked
+groups, `created_at` order and marker order agree in every case. This is a
+separate measurement from the parent-child timestamp monotonicity finding;
+siblings are not on an edge with each other, so the earlier guarantee does not
+cover them.
+ 
+**65 replies are unrepairable half-answers** — a part marker with no sibling in
+the corpus. 37 of those 65 (57%) are a conversation's `first_reply`, so
+half-answers are heavily concentrated in exactly the field retrieval uses.
+ 
+**901 of 28,326 conversations (3.2%) have no substantive Spotify reply at all** —
+every reply in them is a pure deflection. Kept with null `first_reply` fields.
+This is the usable-pool ceiling for retrieval: 27,425 conversations.
+ 
+## Add to "Dataset-level bias"
+ 
+**A brand's own marketing handle can appear as a customer.** Conversation 2812 is
+rooted at `@115888`, a Spotify promotional account whose tweets carry
+`inbound=True`. At the schema level there is nothing distinguishing a promo post
+from a customer's opening message. The >20-tweet cap removes this particular one,
+but the general problem is unbounded: any brand handle flagged inbound will be
+read as a customer. Intent clusters and golden-set samples drawn from opening
+messages can therefore contain brand marketing copy.

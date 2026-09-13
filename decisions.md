@@ -370,3 +370,128 @@ not in the data at all, so the residual few percent below 100 is just
 conversations answered by a different brand. Kept the column with a hard
 footnote rather than deleting it, because the fact that it cannot be computed
 is itself a finding.
+
+## Working dataset (stage 4)
+ 
+**34. Multi-part replies merged on shared parent or self-reply chain, never on
+time-adjacency alone**
+ 
+Split replies turned out to be *siblings*, not chains: in conversation 1878,
+tweets 1880 (`1: ...`) and 1879 (`2: ...`) are both children of customer tweet
+1877. Of 1,483 adjacent same-author outbound pairs in the SpotifyCares subset,
+1,359 share a parent, 17 are a parent-to-child chain, and 106 are neither.
+ 
+That last group is the trap. Those 106 are a brand replying to two different
+customers under one broadcast, adjacent in time. A merge rule keyed on
+"consecutive replies by the same author" would have fused two unrelated
+customers' answers into one text and fed that to retrieval as a single
+historical resolution.
+ 
+The rule therefore requires the parent condition: a tweet continues a merge
+group only when it shares the previous tweet's parent, or its parent *is* the
+previous tweet.
+ 
+**35. Part markers outrank `created_at` when ordering siblings**
+ 
+The verified fact that timestamps never run backwards covers parent-to-child
+edges only. Siblings are not on an edge with each other, so that guarantee does
+not extend to them, and sibling order is exactly what determines whether a
+merged reply reads forwards or backwards.
+ 
+Measured separately: across 1,258 fully-marked sibling groups, `created_at`
+order and `1:`/`2:` marker order agree in every case. Zero disagreements.
+ 
+The precedence rule is encoded anyway. Sort by `created_at`, then assert marker
+numbers are non-decreasing; where they are not, re-sort by marker and increment
+a counter in the stage summary. This is a guard against a disagreement that does
+not currently exist, not a fix for one that does. It fires zero times today, and
+if the dataset ever changes it fails loudly instead of silently producing a
+backwards answer.
+ 
+**36. Conversations over 20 tweets dropped, and what that actually removes**
+ 
+54 conversations (2,773 tweets) of 28,380 fall out, leaving 28,326.
+ 
+The cap was intended as a size guard but its main value turned out to be
+different. The largest thing it removes is conversation 2812, rooted at
+`@115888` — a Spotify marketing handle whose tweets carry `inbound=True`. A
+promotional post is therefore indistinguishable from a customer opening message
+at the schema level, and it had roughly 130 replies underneath it. The cap is
+doing double duty as a brand-handle-as-customer guard.
+ 
+Applied to the raw tweet count before merging, so "20 tweets" means tweets, not
+post-merge turns.
+ 
+**37. Orphan part-markers flagged, not dropped**
+ 
+65 replies carry a part marker but had no sibling to merge with: a `2:` whose
+`1:` is not in the corpus. These are permanently half-answers and cannot be
+repaired.
+ 
+They are flagged with an `orphan_part` boolean rather than removed, for the same
+reason orphan tweets and cycle tweets were kept in earlier stages: dropping rows
+inside a stage changes the dataset's shape invisibly. The exclusion happens
+visibly at the retrieval index instead, as one predicate.
+ 
+The count understates the impact. 37 of the 65 (57%) are a conversation's
+`first_reply`, which is the field retrieval actually uses. Half-answers are
+disproportionately opening replies, so the flag matters far more than 65 out of
+41,980 suggests.
+ 
+**38. `first_reply` reuses the deflection rule rather than defining "substantive"
+again**
+ 
+The first SpotifyCares reply in a conversation is often a bare "DM us /LS", so
+the target reply is the first one that is *not* a pure deflection under decision
+26's existing rule. No new threshold was introduced.
+ 
+27,425 conversations have a substantive first reply. 901 are deflection-only and
+are kept with null `first_reply_*` fields rather than dropped, so the count stays
+visible.
+ 
+**39. Deflection rule extracted to `src/deflection.py`**
+ 
+`scripts/brand_survey.py` is a one-off selection script whose own docstring says
+nothing downstream reads it. Once `src/sample.py` needed the same rule, that
+stopped being true, and a pipeline stage importing from a one-off script is
+backwards.
+ 
+Pure move, no logic change, verified rather than asserted: captured
+`brand_survey --report` output before and after the extraction and diffed them.
+Byte-identical, and still matching the table in `notes/findings.md`.
+ 
+`MULTIPART` deliberately did not move. `sample.py` needs the part *number* as a
+capture group while `brand_survey` needs only a boolean, and changing
+`brand_survey`'s regex would have changed its published table and broken the
+byte-diff test.
+ 
+**40. Leading `@mentions` and part markers stripped from continuation parts**
+ 
+<!-- ADJUST THIS ENTRY TO MATCH WHAT YOU ACTUALLY DECIDED -->
+ 
+Without this, conversation 1878's merged reply reads "...there's info about...
+@116129 2: Spotify content here...". The `@mention` and the `2:` are Twitter
+routing artifacts, not content, and a merged reply is meant to read as one
+reply.
+ 
+Stripped from continuation parts only, never from the first part, and the
+original tweet ids are retained in `first_reply_tweet_ids` so nothing is lost.
+This does edit reply text, which is why it is recorded rather than done quietly.
+ 
+**41. Nested timestamps stored UTC-naive**
+ 
+A tz-aware `created_at` nested inside the `turns` struct produces a parquet file
+that this project's own `read_parquet()` cannot open: duckdb needs `pytz` for
+nested TIMESTAMPTZ but not for a top-level one. Stored the nested timestamp
+UTC-naive instead of adding a dependency to work around a library gap. Lossless,
+because ingest forces `utc=True` across the whole corpus.
+ 
+Found by a round-trip regression test, not by inspection. The write succeeded and
+the pipeline looked healthy; only reading the file back revealed it. That test
+now runs in the suite.
+ 
+**42. `PART_MARKER` restricted to a single digit**
+ 
+A test caught "24/7 support..." parsing as part 24. No live false positives in
+the current data, but it was a mis-sort waiting to happen the first time a reply
+mentioned a time range or a date.
