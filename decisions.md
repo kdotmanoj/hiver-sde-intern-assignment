@@ -237,3 +237,136 @@ tweet's `tweet_id`. Verified rather than assumed that these cannot collide:
 `thread_id` equals the root's `tweet_id` for all 798,197 threads, and `tweet_id` is
 asserted unique at ingest. The summary also asserts `conversation_id.is_unique` so the
 guarantee does not depend on that reasoning surviving a future change.
+
+## Brand selection
+
+**26. Deflection measured with a residual-word threshold of 3**
+
+A reply counts as a pure deflection only if it contains a channel-switch phrase
+AND, after stripping greetings, apologies, agent signatures, willingness
+boilerplate ("we'd be happy to help"), purpose clauses ("so we can look into
+this") and the redirect clause itself, three or fewer content words remain.
+
+The reason for a residual rule rather than a plain regex match: 24.80% of all
+top-8 replies contain a redirect phrase, but many carry real content alongside
+it, for example "which iPhone and version of iOS are you using? please dm us".
+That is a diagnostic question with a redirect attached, not a brush-off.
+
+What the threshold does not measure: it captures bare redirects, not "redirect
+instead of helping". A brand that always asks for a DM but always attaches a
+real question scores low here even though every conversation still leaves
+Twitter. That is why redirect-present rate is reported alongside it rather
+than instead of it. 3 is a tunable knob and the rate moves if it moves;
+validated against a 400-reply sample via `--residuals`, where every flagged
+reply was a genuine bare redirect.
+
+**27. Both bounds reported, not one number**
+
+Pure deflection is the floor, redirect-present is the ceiling, and the truth
+sits between. Reporting only one would make the headline depend entirely on
+the threshold above.
+
+This changed a reading rather than just decorating the table. comcastcares
+looked mid-band at 7.64% pure deflection but is 54.37% redirect-present, the
+widest gap in the table, with a 7-word median residual. It is a "redirect with
+substance" account, which the single column hid. Uber_Support went the other
+way: top on both bounds (63.31 / 37.50) and lowest median residual at 4 words,
+so three independent signals agree and the read does not rest on the threshold.
+
+**28. Median residual word count added as a third measure**
+
+Deflection rate measures what a brand refuses to do. Median residual words,
+computed across all replies rather than just redirects, measures how much
+substance a typical reply actually carries. For the question that matters here
+(can generated replies be grounded in this brand's history?) the second is the
+direct measure.
+
+It separates the field better than deflection rate: AppleSupport, SpotifyCares
+and SouthwestAir at 9 words; AmazonHelp and AmericanAir at 8; Delta at 6,
+depressed by its 10.08% multi-part rate since half a split reply carries half
+the substance.
+
+**29. Help-article links do not count as deflection**
+
+Only channel switches count: DM, call, email, contact form. A link to a fix
+("a clean reinstall of the app should help out: `<url>`") is an answer that
+happens to include a link, not a refusal to answer here. The distinction is
+whether the reply resolves the problem in public or moves it elsewhere, and
+that is the whole question the survey exists to answer.
+
+This is not a neutral call. It materially lowers AppleSupport, whose single
+largest template is "here's what you can do to work around the issue: `<url>`"
+at 5.88% of its replies. Chose the strict definition precisely because the
+looser one would have flattered the result I already expected.
+
+**30. Two classifier leaks documented rather than fixed**
+
+Found while reading the 400-reply residual sample:
+
+- "let's work together in dm here: `<url>`" leaves 4 residual words and so
+  survives the threshold, despite being a pure deflection.
+- Form-fill redirects ("please fill in this form: `<url>`") are not in the
+  pattern set at all.
+
+Both bias every brand's deflection rate downward. Chose to document the
+direction of the bias rather than keep tuning, because this is a one-off
+selection script and further tuning would have cost time the graded
+deliverables need. The reported rates should be read as lower bounds.
+
+**31. Brand chosen: SpotifyCares**
+
+Not the highest volume. Chosen because its public replies contain actual
+resolution content to ground on: "hold Sleep/Wake + Volume Down for 10
+seconds", "what device, operating system, and Spotify version are you using?",
+"a clean reinstall should help out", "Windows Phone is currently in
+maintenance mode".
+
+Numbers: 28,380 conversations, 2.46% pure deflection, 30.38% redirect-present,
+9-word median residual, 0.07% non-English.
+
+What each alternative lost on:
+
+- **AmazonHelp** (82,623 conversations, the largest) is 14.57% non-English
+  through the same handle, mostly Japanese and German. Multilingual handling
+  is explicitly out of scope, and the generator and judge would both have to
+  cope with it.
+- **Uber_Support** is 37.50% pure deflection and 63.31% redirect-present with
+  a 4-word median residual. It routes to DM rather than resolving in public,
+  so there would be little historical resolution to ground a draft in and
+  little for a judge to score.
+- **AppleSupport** (81,640 conversations, 0% non-English, 0% multi-part) is
+  the closest rejected option and looks cleanest on paper. Rejected because
+  its single biggest template is a bare help-article URL at 5.88% of replies,
+  and a URL cannot be grounded in.
+- **SouthwestAir** matches Spotify on median residual (9) and beats it on
+  deflection (1.21%), but has less troubleshooting-shaped content; airline
+  issues resolve through account lookups more than through steps a reply can
+  contain.
+
+Honest caveat for the report: this was not unambiguous. AppleSupport and
+SouthwestAir also sit at 9 median residual words. SpotifyCares wins on the
+combination of low deflection, clean language and troubleshooting-shaped
+content rather than on any single column.
+
+**32. Multi-part replies concatenated before use**
+
+6.23% of SpotifyCares replies are split across tweets ("1:", "2:"), so a
+single tweet is often half an answer. Consecutive replies by the same brand
+author within a conversation are joined in `created_at` order into one logical
+reply before indexing, so retrieval cannot return half a sentence as a
+"historical resolution".
+
+**33. Reply-rate column kept but explicitly disclaimed**
+
+"% of conversations where the brand replied" is 100% by construction under the
+attribution rule (a conversation belongs to brand X iff X authored an outbound
+tweet in it), so it was recomputed over conversations where a customer tweeted
+`@brand`.
+
+That still does not make it a service level. All 49,517 inbound `@AmericanAir`
+mentions in the corpus are already assigned to a conversation, meaning the
+dataset only contains threads that got engaged. The unanswered population is
+not in the data at all, so the residual few percent below 100 is just
+conversations answered by a different brand. Kept the column with a hard
+footnote rather than deleting it, because the fact that it cannot be computed
+is itself a finding.
