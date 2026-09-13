@@ -1,16 +1,17 @@
 PY := uv run python
 
-.PHONY: help all ingest threads conversations test clean
+.PHONY: help all ingest threads conversations sample test clean
 
 help:
-	@echo "make all            ingest -> threads -> conversations"
+	@echo "make all            ingest -> threads -> conversations -> sample"
 	@echo "make ingest         parse data/raw/twcs.csv -> data/interim/tweets.parquet"
 	@echo "make threads        reconstruct the reply graph -> data/interim/threads.parquet"
 	@echo "make conversations  split threads into conversations -> data/interim/conversations.parquet"
+	@echo "make sample         cut to SpotifyCares, merge split replies -> data/interim/spotify.parquet"
 	@echo "make test           run the test suite"
 	@echo "make clean          delete data/interim/ (derived data; regenerate with make ingest)"
 
-all: ingest threads conversations
+all: ingest threads conversations sample
 
 ingest:
 	$(PY) -m src.ingest
@@ -20,6 +21,9 @@ threads:
 
 conversations:
 	$(PY) -m src.conversations
+
+sample:
+	$(PY) -m src.sample
 
 test:
 	uv run pytest -q
