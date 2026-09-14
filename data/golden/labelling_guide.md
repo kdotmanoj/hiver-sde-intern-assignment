@@ -301,3 +301,46 @@ compared against the actual golden set afterwards:
 
 No class swallows the data and none sits below about 5%, which is what macro-F1
 needs to be meaningful.
+
+---
+
+## The escalate vs auto-handle decision
+
+Every labelled example gets one of these alongside its intent.
+
+**ESCALATE to a human when:**
+
+- The answer needs account-specific data Spotify cannot see from a public
+  tweet: actual charges, subscription state, student verification status,
+  who is on a family plan, whether a refund was issued.
+- Money is genuinely in dispute. A wrong charge needs someone with access to
+  the billing system, not a template.
+- The account is compromised. Hacked accounts are urgent and need identity
+  verification.
+- The customer is abusive, or is threatening to cancel or switch to a
+  competitor. The reply needs judgement about tone and retention, not a
+  canned answer.
+- There is legal or safety language: chargebacks, fraud accusations, threats
+  of legal action, anything involving a minor.
+
+**AUTO-HANDLE when the reply can be written from Spotify's own past public
+replies:**
+
+- General how-to questions with a known answer.
+- Feature requests, including country availability and device support. The
+  honest reply is "we will pass this on", which needs no account access.
+- Known bugs with a public workaround: reinstall, log out and back in, check
+  your app version.
+- Catalogue questions where the answer is public: this album is not available
+  in your region, that playlist was retired.
+- Anything where the historical reply Spotify actually sent was itself
+  generic.
+
+**Tiebreak:** ask whether a support agent with no system access could write a
+useful reply from public information alone. If yes, auto. If they would have
+to look something up in an internal tool, escalate.
+
+**Note:** escalation is about whether a public reply can resolve it, not about
+how upset the customer is. Anger raises escalation only when it needs a
+retention or tone judgement, which is why "threatening to cancel" is on the
+escalate list but ordinary frustration is not.
