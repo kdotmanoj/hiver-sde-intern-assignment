@@ -1,17 +1,18 @@
 PY := uv run python
 
-.PHONY: help all ingest threads conversations sample test clean
+.PHONY: help all ingest threads conversations sample taxonomy test clean
 
 help:
-	@echo "make all            ingest -> threads -> conversations -> sample"
+	@echo "make all            ingest -> threads -> conversations -> sample -> taxonomy"
 	@echo "make ingest         parse data/raw/twcs.csv -> data/interim/tweets.parquet"
 	@echo "make threads        reconstruct the reply graph -> data/interim/threads.parquet"
 	@echo "make conversations  split threads into conversations -> data/interim/conversations.parquet"
 	@echo "make sample         cut to SpotifyCares, merge split replies -> data/interim/spotify.parquet"
+	@echo "make taxonomy       embed + cluster 2,000 openings -> notes/clusters_k{6,8,10}.md"
 	@echo "make test           run the test suite"
 	@echo "make clean          delete data/interim/ (derived data; regenerate with make ingest)"
 
-all: ingest threads conversations sample
+all: ingest threads conversations sample taxonomy
 
 ingest:
 	$(PY) -m src.ingest
@@ -24,6 +25,9 @@ conversations:
 
 sample:
 	$(PY) -m src.sample
+
+taxonomy:
+	$(PY) -m src.taxonomy
 
 test:
 	uv run pytest -q
