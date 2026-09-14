@@ -235,3 +235,8 @@ from a customer's opening message. The >20-tweet cap removes this particular one
 but the general problem is unbounded: any brand handle flagged inbound will be
 read as a customer. Intent clusters and golden-set samples drawn from opening
 messages can therefore contain brand marketing copy.
+
+## Pre-clustering intuition
+- Library/Playback clusters
+- Account access clusters
+- Billing issues 
