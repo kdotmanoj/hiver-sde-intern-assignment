@@ -1,6 +1,6 @@
 PY := uv run python
 
-.PHONY: help all ingest threads conversations sample taxonomy diagnose baselines agent test clean
+.PHONY: help all ingest threads conversations sample taxonomy diagnose baselines agent eval test clean
 
 help:
 	@echo "make all            ingest -> threads -> conversations -> sample -> taxonomy"
@@ -12,6 +12,7 @@ help:
 	@echo "make diagnose       top-1 similarity spread over the golden set (offline, no key)"
 	@echo "make baselines      trivial + k-NN baselines over the golden set (offline, no key)"
 	@echo "make agent          run the agent over all 150 golden openings (LIVE, ~20 min)"
+	@echo "make eval           score agent + both baselines on the golden set (offline, no key)"
 	@echo "make test           run the test suite"
 	@echo "make clean          delete data/interim/ (derived data; regenerate with make ingest)"
 
@@ -48,6 +49,12 @@ baselines:
 # rule being correct. Live run against Gemini; replays from cache afterwards.
 agent:
 	$(PY) -m src.agent --golden --force-reply --out data/interim/agent_golden.jsonl
+
+# Scores jsonl already on disk -- no model, no embeddings, no key. CACHE_ONLY=1
+# is the guard, not a convenience: if this ever needs a key, the scoring stage
+# has started calling a model and stopped being reproducible.
+eval:
+	CACHE_ONLY=1 $(PY) -m src.evaluate
 
 test:
 	uv run pytest -q
