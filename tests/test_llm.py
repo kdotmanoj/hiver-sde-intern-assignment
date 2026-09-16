@@ -300,3 +300,59 @@ def test_empty_completion_is_not_cached(monkeypatch):
 
     key = llm._cache_key(prompt="hello", model="gemini-2.0-flash", system=None)
     assert not llm._cache_path(key).exists()
+
+
+# --------------------------------------------------------------------------
+# cached_response: the read-only probe the quota preflight is built on
+# --------------------------------------------------------------------------
+
+
+def test_cached_response_returns_none_on_a_miss_without_network(monkeypatch):
+    no_network(monkeypatch)
+
+    assert llm.cached_response(prompt="hello", model="gemini-2.0-flash") is None
+
+
+def test_cached_response_returns_the_hit_without_network(monkeypatch):
+    recording_post(monkeypatch, [FakeResponse(200, gemini_body("cached answer"))])
+    no_sleep(monkeypatch)
+    llm.complete(prompt="hello", model="gemini-2.0-flash")
+
+    no_network(monkeypatch)
+
+    assert llm.cached_response(prompt="hello", model="gemini-2.0-flash") == "cached answer"
+
+
+def test_cached_response_does_not_write_a_cache_entry(monkeypatch):
+    """A probe that populated the cache would make the second probe lie."""
+    no_network(monkeypatch)
+
+    llm.cached_response(prompt="hello", model="gemini-2.0-flash")
+
+    key = llm._cache_key(prompt="hello", model="gemini-2.0-flash", system=None)
+    assert not llm._cache_path(key).exists()
+
+
+def test_cached_response_is_ignored_by_cache_only(monkeypatch):
+    """CACHE_ONLY turns a miss into an error for complete(); the probe just says no.
+
+    That distinction matters: the preflight must be able to ask "is this
+    cached?" under any environment without raising.
+    """
+    monkeypatch.setenv("CACHE_ONLY", "1")
+    no_network(monkeypatch)
+
+    assert llm.cached_response(prompt="hello", model="gemini-2.0-flash") is None
+
+
+def test_cached_response_agrees_with_complete_on_the_key(monkeypatch):
+    """Both must hash the same three inputs, or the preflight counts the wrong thing."""
+    recording_post(monkeypatch, [FakeResponse(200, gemini_body("systemed"))])
+    no_sleep(monkeypatch)
+    llm.complete(prompt="hello", model="gemini-2.0-flash", system="be terse")
+
+    no_network(monkeypatch)
+
+    assert llm.cached_response("hello", "gemini-2.0-flash", "be terse") == "systemed"
+    # A different system prompt is a different call, and must probe as a miss.
+    assert llm.cached_response("hello", "gemini-2.0-flash", "be verbose") is None

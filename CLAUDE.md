@@ -53,8 +53,15 @@
   ## Model stack (fixed — do not substitute without asking)
 - Embeddings: local sentence-transformers all-MiniLM-L6-v2. Never an API.
   Cache vectors to data/cache/embeddings/ as .npy.
-- Generator + classifier: gemini-3.6-flash via AI Studio free key.
-  ~15 RPM. Min 4s gap between live calls, exponential backoff on 429.
+- Generator + classifier: gemini-3.5-flash-lite via AI Studio free key.
+  500 RPD / 15 RPM. Min 4s gap between live calls, exponential backoff on 429.
+  NOT gemini-3.6-flash: its free tier is 20 requests PER DAY, which one golden
+  run exhausts in its first fifteen conversations. Measured the hard way --
+  21 calls burned a whole day's quota. RPD is the binding limit on this model,
+  not RPM, and a full cold golden run (150 classify + 150 reply) is 300 calls.
+- Before any batch of live Gemini calls, count the uncached ones first and
+  abort if the count exceeds src/agent.py's MAX_LIVE_CALLS. Discovering a
+  daily quota wall partway through a run spends the calls and returns nothing.
 - Judge: Groq openai/gpt-oss-120b. 30 RPM, 8K TPM, 200K TPD.
   TPD is our tightest constraint — keep judge prompts under ~500 tokens
   and warn me if a planned change would push a full judge run over 120K.

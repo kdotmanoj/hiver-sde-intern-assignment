@@ -68,6 +68,18 @@ class CacheOnlyError(LLMError):
     """CACHE_ONLY=1 is set and this prompt is not in the cache."""
 
 
+def cached_response(prompt: str, model: str, system: str | None = None) -> str | None:
+    """The cached completion for these inputs, or None if there is no cache entry.
+
+    A read-only probe: it never calls a provider, never sleeps, and never writes.
+    Exists so a caller can count how many live calls a planned batch would need
+    BEFORE spending any of them -- see src/agent.py's preflight. Without this,
+    the only way to find out is to start the run and hit the quota wall partway
+    through, which is exactly the failure it is there to prevent.
+    """
+    return _read_cache(_cache_key(prompt=prompt, model=model, system=system))
+
+
 def complete(prompt: str, model: str, system: str | None = None) -> str:
     """Return the model's completion for `prompt`, from cache when possible.
 

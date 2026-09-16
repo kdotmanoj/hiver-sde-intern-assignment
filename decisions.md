@@ -465,18 +465,28 @@ capture group while `brand_survey` needs only a boolean, and changing
 `brand_survey`'s regex would have changed its published table and broken the
 byte-diff test.
  
-**40. Leading `@mentions` and part markers stripped from continuation parts**
+**40. Part markers and continuation mentions stripped from merged replies**
  
-<!-- ADJUST THIS ENTRY TO MATCH WHAT YOU ACTUALLY DECIDED -->
+A merged reply has to read as one reply. Two separate strips do that:
  
-Without this, conversation 1878's merged reply reads "...there's info about...
-@116129 2: Spotify content here...". The `@mention` and the `2:` are Twitter
-routing artifacts, not content, and a merged reply is meant to read as one
-reply.
+- **Continuation parts** lose their leading `@mention` and their part marker.
+  Without this, conversation 1878's merged reply reads "...there's info
+  about... @116129 2: Spotify content here...". Both are Twitter routing
+  artifacts, not content.
+- **The first part** loses its part marker too, but keeps its `@mention`. A
+  `1:` means "part 1 of N", and after merging there is no part N, so it is
+  stale. The mention stays because every reply has one, so it is uniform.
+Unmerged replies are untouched, which keeps `orphan_part` honest: a lone `2:`
+with no sibling stays visible as the half-answer it is.
  
-Stripped from continuation parts only, never from the first part, and the
-original tweet ids are retained in `first_reply_tweet_ids` so nothing is lost.
-This does edit reply text, which is why it is recorded rather than done quietly.
+The marker regex requires a single digit and allows a letter directly after the
+delimiter. Both constraints came from real cases: "24/7 support" parsed as part
+24, and one reply reads `1:Thanks` with no space, which the original pattern
+missed. A bare "any whitespace or nothing" delimiter would have made "we close
+at 5:30pm" parse as part 5.
+ 
+Original tweet ids are retained in `first_reply_tweet_ids`, so nothing is lost.
+This edits reply text, which is why it is recorded rather than done quietly.
  
 **41. Nested timestamps stored UTC-naive**
  
@@ -495,3 +505,103 @@ now runs in the suite.
 A test caught "24/7 support..." parsing as part 24. No live false positives in
 the current data, but it was a mis-sort waiting to happen the first time a reply
 mentioned a time range or a date.
+
+**43. Retrieval corpus is the 2,000-row taxonomy sample, not all 27,400**
+ 
+~1,849 conversations after removing the 150 golden ids and orphan first
+replies. The eligible pool is roughly 27,400.
+ 
+The reason is the repro requirement, not a modelling judgement. `embed.py`
+writes one committed `.npy` per vector so that `make eval` replays offline with
+no API key and no model download. Embedding the full pool would add about 27,000
+blobs and 45MB to the repo purely to keep that property.
+ 
+This is a real cost and belongs in the report's limitations: retrieval draws
+from a pool roughly 7% the size of what is available, so grounding quality is
+almost certainly worse than it would be with the full corpus. Expanding it is
+the first item on the "one more week" list.
+ 
+**44. k = 3 retrieved neighbours**
+ 
+Enough precedent to ground a reply that is itself tweet-length, while keeping
+the prompt small. The generator runs on a free tier with a token-per-minute
+ceiling, and a full evaluation run is 150 reply calls.
+ 
+**45. `SIMILARITY_FLOOR = 0.60`**
+ 
+Set from the measured distribution, not picked as a round number. Top-1 cosine
+similarity across the 150 golden openings against the corpus: min 0.405,
+p10 0.588, p50 0.736, p90 0.833.
+ 
+0.60 sits just above the 10th percentile and fires the `no_similar_precedent`
+signal on 11.3% of the golden set. 0.70 was rejected because it would fire on
+35.3%, which is not a plausible rate of "we have never seen anything like this"
+when the median similarity is 0.736.
+ 
+The claim the signal encodes: if nothing in the corpus resembles this message,
+there is no past reply to ground a draft in, so a human should write it.
+ 
+**46. Legal/safety lexicon narrowed to exclude minor-related terms**
+ 
+The labelling guide says escalate on "anything involving a minor". Encoding that
+literally turned out to be wrong on this corpus: "my son", "my daughter", "my
+kid" and "my child" produced 89 of the 101 hits for that signal, and every one
+of them is family-plan mechanics ("when I try to add my son to my family account
+it says whoops"), not safeguarding.
+ 
+Left in, the signal would have escalated nearly every family-plan message on a
+safety basis, which is both wrong and would have swamped the per-family
+escalation metrics with noise. The clause now covers chargeback, fraud, lawyer
+and legal action.
+ 
+Same standard as the deflection patterns in decision 26: counted against the
+real corpus before being accepted, rather than written from intuition.
+ 
+Related and deliberately left unfixed: the abuse lexicon fires on golden id
+93962 ("Screw @115888 for the massive mobile app update..."), which is labelled
+`escalate=false` because it is ambient swearing rather than abuse aimed at
+anyone. It is commented as a known false positive in the source so the
+per-family metrics quantify it rather than hide it.
+ 
+**47. Escalation is a flat OR over named signals, with per-family attribution**
+ 
+No weights, no scoring model. Six signals in three families — intent class,
+retrieval similarity, and text — and the decision is `escalate` if any fired.
+The rule is deliberately simple enough to derive on a whiteboard, which is the
+point of a policy that decides whether a human sees a ticket.
+ 
+The attribution exists because the combined number alone would be misleading.
+`billing_dispute` and `account_access` are about 27% of the golden set and
+almost all escalate, so intent alone was expected to carry most of the decision.
+`signals_by_family()` records which families fired on each case so the
+evaluation can score each one independently and show whether similarity and text
+add anything over the intent lookup. The expectation gets measured rather than
+assumed.
+ 
+The attribution is derived from a `SIGNAL_FAMILY` name-to-family lookup rather
+than reimplemented, so it cannot drift from the rule, and a test asserts every
+emittable signal has a family assigned — a new signal cannot silently vanish
+from the report.
+ 
+**48. Escalated cases skip reply generation in production, but not in evaluation**
+ 
+By default `answer()` does not generate a reply when the decision is `escalate`.
+That saves quota on exactly the cases where the draft would be discarded, and it
+makes the escalation decision load-bearing rather than decorative.
+ 
+Evaluation needs the opposite. Scoring the judge only on auto-handled cases
+would make every quality number conditional on the escalation rule being
+correct, which is one of the things under test, and it would drop the hardest
+cases from the judge set. `--force-reply` generates regardless; the decision is
+still computed and recorded in full, and `reply_generated` is stored separately
+from `decision` so a forced run stays distinguishable from a production one.
+ 
+No wasted calls either way: the reply prompt does not contain the escalation
+decision, so the cache key is identical and a later default run reuses the
+replies a forced run already cached.
+
+**49** Model switched to gemini-3.5-flash-lite after Gemini 3.6 Flash turned out to be 20 requests/day, not the ~1,000 the docs suggest. Discovered by exhausting it at call 21 of a 300-call run. Second time Gemini's own metadata proved unreliable (the first being the 404 on a model the list endpoint advertised). 22 cache entries under the old model are stranded and kept as a record.
+
+**50** MAX_LIVE_CALLS = 320 with a preflight that counts uncached calls before the loop starts. A daily quota doesn't queue — it fails, and the calls already spent stay spent. The preflight is an upper bound when the classify cache is cold, since the reply prompt contains the intent and can't be known in advance.
+
+Then start the baselines session. Don't wait for the run to finish — the two can proceed in parallel since baselines make no LLM calls.

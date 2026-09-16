@@ -1,6 +1,6 @@
 PY := uv run python
 
-.PHONY: help all ingest threads conversations sample taxonomy test clean
+.PHONY: help all ingest threads conversations sample taxonomy diagnose agent test clean
 
 help:
 	@echo "make all            ingest -> threads -> conversations -> sample -> taxonomy"
@@ -9,6 +9,8 @@ help:
 	@echo "make conversations  split threads into conversations -> data/interim/conversations.parquet"
 	@echo "make sample         cut to SpotifyCares, merge split replies -> data/interim/spotify.parquet"
 	@echo "make taxonomy       embed + cluster 2,000 openings -> notes/clusters_k{6,8,10}.md"
+	@echo "make diagnose       top-1 similarity spread over the golden set (offline, no key)"
+	@echo "make agent          run the agent over all 150 golden openings (LIVE, ~20 min)"
 	@echo "make test           run the test suite"
 	@echo "make clean          delete data/interim/ (derived data; regenerate with make ingest)"
 
@@ -28,6 +30,17 @@ sample:
 
 taxonomy:
 	$(PY) -m src.taxonomy
+
+# Evidence for escalate.SIMILARITY_FLOOR. Embeddings only, no LLM calls, so
+# CACHE_ONLY=1 proves the retrieval corpus is fully cached at the same time.
+diagnose:
+	CACHE_ONLY=1 $(PY) -m src.agent --diagnose
+
+# --force-reply: the eval stage needs a draft for all 150, including the ones
+# the rule escalates, or the judge's scores become conditional on the escalation
+# rule being correct. Live run against Gemini; replays from cache afterwards.
+agent:
+	$(PY) -m src.agent --golden --force-reply --out data/interim/agent_golden.jsonl
 
 test:
 	uv run pytest -q
