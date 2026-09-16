@@ -188,6 +188,15 @@ many songs I have downloaded?"*, *"how do I post songs from Spotify?"*.
 **Edge:** *"How do I remove a playlist that says 'Loading..'?"* -> how_to_question.
 There is a stuck playlist, but the ask is how-to. Label by the ask.
 
+**broken beats phrasing.** A message asking "how do I fix X" where X is
+broken is X's intent, not how_to_question. The polite framing is the ask, not
+the intent. how_to_question is only for cases where nothing is broken.
+
+*"Just purchased the premium family plan but can't invite family members"* is
+account_access, not how_to_question — the invite is broken.
+*"Is there a way to stop my devices auto-connecting?"* is how_to_question —
+nothing is broken, they want to know if a setting exists.
+
 ### 8. feature_request
 
 They want Spotify to build, change or extend something that does not exist yet.
@@ -317,9 +326,12 @@ Every labelled example gets one of these alongside its intent.
   the billing system, not a template.
 - The account is compromised. Hacked accounts are urgent and need identity
   verification.
-- The customer is abusive, or is threatening to cancel or switch to a
-  competitor. The reply needs judgement about tone and retention, not a
-  canned answer.
+- The customer is abusive, or is explicitly cancelling or demanding a refund.
+  A passing mention of a competitor ("guess I'll switch to Apple Music") is
+  not enough on its own — it appears constantly in ordinary feature requests
+  and complaints, and escalating all of them would make escalation
+  meaningless. Escalate when the customer states they are leaving or wants
+  money back, not when they grumble about alternatives.
 - There is legal or safety language: chargebacks, fraud accusations, threats
   of legal action, anything involving a minor.
 
