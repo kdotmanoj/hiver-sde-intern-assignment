@@ -605,3 +605,5 @@ replies a forced run already cached.
 **50** MAX_LIVE_CALLS = 320 with a preflight that counts uncached calls before the loop starts. A daily quota doesn't queue — it fails, and the calls already spent stay spent. The preflight is an upper bound when the classify cache is cold, since the reply prompt contains the intent and can't be known in advance.
 
 Then start the baselines session. Don't wait for the run to finish — the two can proceed in parallel since baselines make no LLM calls.
+
+the 0/0 convention, macro-F1 over all nine including never-predicted, paired bootstrap.

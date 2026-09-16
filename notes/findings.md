@@ -239,4 +239,8 @@ messages can therefore contain brand marketing copy.
 ## Pre-clustering intuition
 - Library/Playback clusters
 - Account access clusters
-- Billing issues 
+- Billing issues
+
+agent macro-F1 0.716 [0.632, 0.780]; k-NN 0.376; trivial 0.039
+escalation: intent family alone F1 0.735, combined rule 0.602, similarity 0.074 (17 fires, precision 0.118), text 0.103 (2 fires)
+the similarity threshold was set from the similarity distribution, not validated against escalate labels; it does not predict escalation

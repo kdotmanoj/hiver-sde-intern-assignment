@@ -32,10 +32,41 @@ Openings under 5 words are oversampled to SHORT_SHARE of the set (~4x their
 natural rate). They carry the least intent signal and are where the
 classifier is most likely to fail, so the golden set should hold more of
 them than chance would give.
+
+--relabel: the second pass
+--------------------------
+
+`--relabel` draws 50 of the already-labelled conversations and asks for them
+again, blind, writing to data/golden/labels_pass2.jsonl. `--score` then joins
+the two files on conversation_id and prints Cohen's kappa, raw agreement and
+the disagreements; it writes nothing. The two flags cannot be combined --
+--score displays pass-1 labels, which is exactly what a --relabel session must
+not do.
+
+Self-agreement is a number the report can put beside the classifier's kappa:
+the agent is being scored against labels whose own author reproduces them only
+so often, and the gap between those two figures is the part of the agent's
+error that is not the agent's.
+
+Blind means blind. The pass-1 intent is read exactly once, to stratify the
+draw so all nine labels are represented, and is dropped before the session
+starts -- see select_relabel(), which asserts that no pass-1 answer survives
+into the frame the session iterates. Nothing about pass 1 is printed at any
+point, including the per-intent quota breakdown that the pass-1 summary line
+prints for clusters.
+
+The draw is seeded 43, not 42, so it is not the same subset order the first
+pass was labelled in.
+
+What pass 2 deliberately does NOT change is the information on screen: the
+same text, cluster id, word count and escalation rule. Showing less would
+measure the effect of removing context, and showing more would measure the
+effect of adding it; neither is label stability.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -45,11 +76,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from src import metrics
 from src.embed import embed
 from src.ingest import REPO_ROOT, _display_path
 from src.taxonomy import SHORT_WORDS, allocate, cluster, draw_sample, load_eligible
 
 LABELS_PATH = REPO_ROOT / "data" / "golden" / "labels.jsonl"
+PASS2_PATH = REPO_ROOT / "data" / "golden" / "labels_pass2.jsonl"
 GUIDE_PATH = REPO_ROOT / "data" / "golden" / "labelling_guide.md"
 NOTES = REPO_ROOT / "notes"
 
@@ -62,6 +95,18 @@ EXEMPLAR_LINE = re.compile(r"^- `(\d+)`")
 SEED = 42
 N_LABEL = 150
 K = 8
+
+# The second pass. A different seed from SEED on purpose: reusing 42 would draw
+# the 50 in the same relative order the first pass met them in, and order is one
+# of the things a second pass is supposed to vary.
+RELABEL_SEED = 43
+N_RELABEL = 50
+
+# Keys that carry a pass-1 ANSWER. None of these may reach the session frame --
+# enforced by assert_blind(), not by care. The failure being guarded against is
+# silent: a leaked column does not crash, it just quietly turns the kappa into a
+# measurement of how well I can copy.
+PASS1_ANSWER_KEYS = ("intent", "escalate", "other_flags", "hard", "note", "labelled_at")
 
 # Share of the 150 reserved for openings under SHORT_WORDS words. They are
 # ~2.25% of the sample, so this is roughly a 4x oversample. Shortfall in any
@@ -81,6 +126,11 @@ INTENTS = {
     "8": "feature_request",
     "9": "other",
 }
+
+# The nine names in the guide's order, for anything that needs a label set --
+# kappa and the confusion table both do. Derived from INTENTS rather than
+# retyped, so a renamed intent cannot end up with two spellings in one file.
+INTENT_NAMES = tuple(INTENTS.values())
 
 OTHER_FLAGS = {"n": "nonenglish", "b": "brandpromo", "x": "noask"}
 
@@ -187,6 +237,96 @@ def select(pool: pd.DataFrame, total: int = N_LABEL) -> pd.DataFrame:
     # Shuffled, so the labeller does not meet the clusters in blocks and start
     # labelling by position instead of by text.
     return selected.sample(frac=1, random_state=SEED).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------
+# selection: the blind second pass
+# --------------------------------------------------------------------------
+
+
+def read_intents(path: Path, what: str) -> dict[int, str]:
+    """conversation_id -> intent, from a labels file.
+
+    Returns intents rather than whole records: on the relabel path, the escalate
+    flag, the sub-flags, the hard flag and the note are pass-1 answers that have
+    no business being loaded at all.
+    """
+    records = read_done(path)
+    if not records:
+        raise FileNotFoundError(f"no labels in {_display_path(path)} -- {what}")
+    return {cid: record["intent"] for cid, record in records.items()}
+
+
+def read_pass1_intents(path: Path | None = None) -> dict[int, str]:
+    """The only read of pass 1 on the RELABEL path, called before the session.
+
+    (--score reads pass 1 too, but that is a separate invocation which runs no
+    session; argparse makes the two flags mutually exclusive so a scoring run
+    can never put pass-1 labels on screen while there is labelling to do.)
+    """
+    return read_intents(
+        path or LABELS_PATH,
+        "there is nothing to re-label. Run the first pass before the second.",
+    )
+
+
+def assert_blind(selected: pd.DataFrame) -> None:
+    """Fail loudly if any pass-1 answer survived into the session frame.
+
+    Cheap, and the only thing standing between a leaked column and a kappa that
+    silently measures recall of my own earlier answers instead of agreement
+    with them.
+    """
+    leaked = [column for column in selected.columns if column in PASS1_ANSWER_KEYS]
+    assert not leaked, f"pass-1 answers leaked into the relabel frame: {leaked}"
+
+
+def select_relabel(
+    pool: pd.DataFrame,
+    intents: dict[int, str],
+    total: int = N_RELABEL,
+    seed: int = RELABEL_SEED,
+) -> pd.DataFrame:
+    """`total` already-labelled conversations, stratified by their pass-1 intent.
+
+    Stratifying by the pass-1 label is the point: a uniform draw of 50 from 150
+    would take ~2 of the rare classes and the per-class agreement would rest on
+    almost nothing. It does mean the pass-1 labels decide WHICH conversations
+    come back, which is unavoidable -- and harmless, because what is measured is
+    the label given to each one, not which ones were chosen.
+
+    The intent column exists inside this function and nowhere outside it. The
+    returned frame is shuffled, so the strata are not presented in blocks: a
+    labeller who met nine playback_library messages in a row would infer the
+    grouping and, from it, the pass-1 answer.
+    """
+    labelled = pool[pool["conversation_id"].isin(intents)]
+
+    missing = set(intents) - set(labelled["conversation_id"])
+    assert not missing, (
+        f"{len(missing)} labelled conversations are not in the pool, e.g. "
+        f"{sorted(missing)[:3]} -- labels.jsonl came from a different draw than this one"
+    )
+
+    # Materialized rather than chained: `stratum` is a pass-1 answer living in a
+    # frame, and it must be visible where it is added and where it is dropped.
+    with_intent = labelled.assign(stratum=labelled["conversation_id"].map(intents))
+    counts = with_intent.groupby("stratum", dropna=False).size().sort_index()
+    quotas = allocate(counts, total)
+
+    parts = [
+        with_intent[with_intent["stratum"] == stratum].sample(quota, random_state=seed)
+        for stratum, quota in quotas.items()
+        if quota > 0
+    ]
+
+    selected = pd.concat(parts).drop(columns="stratum")
+    assert len(selected) == total, f"selected {len(selected)}, wanted {total}"
+    assert selected["conversation_id"].is_unique, "the same conversation was drawn twice"
+
+    shuffled = selected.sample(frac=1, random_state=seed).reset_index(drop=True)
+    assert_blind(shuffled)
+    return shuffled
 
 
 # --------------------------------------------------------------------------
@@ -315,8 +455,14 @@ def ask_note_and_hard() -> tuple[str, bool]:
 # --------------------------------------------------------------------------
 
 
-def label(selected: pd.DataFrame, done: dict[int, dict]) -> int:
-    """Prompt for every unlabelled row in order. Returns how many were added."""
+def label(selected: pd.DataFrame, done: dict[int, dict], path: Path, pass_number: int = 1) -> int:
+    """Prompt for every unlabelled row in order. Returns how many were added.
+
+    `path` is required and never defaulted. append() falls back to LABELS_PATH
+    when given None, so a label() that forgot to pass one through would write
+    the second pass's answers into the first pass's file and destroy the thing
+    being measured -- with no error, and no way back except git.
+    """
     total = len(selected)
     added = 0
 
@@ -345,8 +491,11 @@ def label(selected: pd.DataFrame, done: dict[int, dict]) -> int:
             "n_words": int(row.n_words),
             "opening_text": str(row.opening_text),
             "labelled_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            # On every record, both passes, so a merged file is never ambiguous
+            # about which answer came from which sitting.
+            "pass": pass_number,
         }
-        append(record)
+        append(record, path)
         added += 1
 
         flag_text = (" +" + ",".join(flags)) if flags else ""
@@ -359,11 +508,129 @@ def label(selected: pd.DataFrame, done: dict[int, dict]) -> int:
     return added
 
 
-def main() -> None:
-    pool = build_pool()
-    candidates = pool[~pool["is_exemplar"]]
-    selected = select(candidates)
-    done = read_done()
+# --------------------------------------------------------------------------
+# scoring the two passes against each other
+# --------------------------------------------------------------------------
+
+
+def disagreements(pass1: list[str], pass2: list[str], ids: list[int]) -> list[dict]:
+    """Every (pass-1 label, pass-2 label) pair that differs, with its count.
+
+    A full 9x9 matrix over 50 rows would be 81 cells with ~8 non-zero, so this
+    lists only the off-diagonal pairs that actually occurred. Sorted by count
+    descending, then by label order, so a rerun prints the same table.
+    """
+    pairs: dict[tuple[str, str], list[int]] = {}
+    for first, second, conversation_id in zip(pass1, pass2, ids):
+        if first != second:
+            pairs.setdefault((first, second), []).append(conversation_id)
+
+    names = list(INTENT_NAMES)
+    return sorted(
+        (
+            {"pass1": first, "pass2": second, "n": len(found), "ids": found}
+            for (first, second), found in pairs.items()
+        ),
+        key=lambda row: (-row["n"], names.index(row["pass1"]), names.index(row["pass2"])),
+    )
+
+
+def score_passes(labels_path: Path | None = None, pass2_path: Path | None = None) -> dict:
+    """Cohen's kappa between the two passes. Prints only; writes nothing.
+
+    What this measures is SELF-agreement: one labeller, the same guide, two
+    sittings. That is not inter-annotator agreement, and it is the more
+    forgiving of the two -- a second person would not share my particular
+    reading of the guide's edge cases.
+    """
+    labels_path = labels_path or LABELS_PATH
+    pass2_path = pass2_path or PASS2_PATH
+
+    pass1 = read_intents(labels_path, "run the first pass before scoring.")
+    pass2 = read_intents(
+        pass2_path, "run `python label_cli.py --relabel` before scoring."
+    )
+
+    # Inner join. A partial second pass is the normal case mid-way through, so
+    # scoring what exists beats refusing until all 50 are done.
+    common = sorted(set(pass1) & set(pass2))
+    if not common:
+        sys.exit(
+            f"no conversation_id appears in both {_display_path(labels_path)} and "
+            f"{_display_path(pass2_path)} -- nothing to compare."
+        )
+
+    orphans = sorted(set(pass2) - set(pass1))
+    if orphans:
+        print(
+            f"  warning: {len(orphans)} pass-2 ids are not in pass 1, e.g. {orphans[:3]} "
+            f"-- excluded from the join"
+        )
+
+    y1 = [pass1[cid] for cid in common]
+    y2 = [pass2[cid] for cid in common]
+
+    kappa = metrics.cohens_kappa(y1, y2, INTENT_NAMES)
+    agreement = metrics.accuracy(y1, y2)
+    n_agreed = sum(1 for first, second in zip(y1, y2) if first == second)
+
+    print(
+        f"label_cli --score: pass 1 {len(pass1)} -> pass 2 {len(pass2)} -> "
+        f"joined {len(common)} (agreed {n_agreed}, differed {len(common) - n_agreed})"
+    )
+    print("")
+    print(f"  raw agreement:   {agreement:.3f}  ({n_agreed}/{len(common)})")
+    print(f"  Cohen's kappa:   {kappa:.3f}")
+    print("")
+    print("  Raw agreement counts the agreement two coin-flippers would get by chance;")
+    print("  kappa subtracts it. Both are over the same 9-class label set.")
+    print("  This is one labeller twice, not two labellers -- self-agreement, which is")
+    print("  the looser of the two measures.")
+
+    # Both passes using a single label makes expected agreement 1.0, so kappa is
+    # 0/0 and src/metrics.py returns 0.0 by documented choice. Printing a bare
+    # "agreement 1.000, kappa 0.000" next to each other reads as a bug in the
+    # kappa; it is not, and the reason belongs on screen where it happens.
+    if len(set(y1) | set(y2)) == 1:
+        print("")
+        print(
+            f"  NOTE: every joined row is {y1[0]!r} in both passes. Expected agreement is"
+        )
+        print("  then 1.0, kappa is 0/0, and metrics.cohens_kappa returns 0.0 by choice.")
+        print("  The kappa above is not meaningful on this subset -- score more rows.")
+
+    rows = disagreements(y1, y2, common)
+    if not rows:
+        print("")
+        print("  No disagreements.")
+        return {"n": len(common), "kappa": kappa, "agreement": agreement, "disagreements": rows}
+
+    print("")
+    print(f"  the {len(common) - n_agreed} disagreements (pass 1 -> pass 2)")
+    print(f"  {'pass 1':<20}{'pass 2':<20}{'n':>3}   conversation ids")
+    for row in rows:
+        shown = ", ".join(str(cid) for cid in row["ids"][:4])
+        more = f", +{len(row['ids']) - 4}" if len(row["ids"]) > 4 else ""
+        print(f"  {row['pass1']:<20}{row['pass2']:<20}{row['n']:>3}   {shown}{more}")
+
+    # Which labels I am least stable on. Counted over both directions, because a
+    # label that is confused in either direction is one whose boundary is soft.
+    involved: dict[str, int] = {}
+    for row in rows:
+        involved[row["pass1"]] = involved.get(row["pass1"], 0) + row["n"]
+        involved[row["pass2"]] = involved.get(row["pass2"], 0) + row["n"]
+
+    ranked = sorted(involved.items(), key=lambda item: (-item[1], INTENT_NAMES.index(item[0])))
+    print("")
+    print("  labels involved in a disagreement, either direction:")
+    print("    " + "  ".join(f"{name} {count}" for name, count in ranked))
+
+    return {"n": len(common), "kappa": kappa, "agreement": agreement, "disagreements": rows}
+
+
+def run_session(selected: pd.DataFrame, path: Path, pass_number: int) -> None:
+    """Resume, report, prompt. Shared by both passes so they behave identically."""
+    done = read_done(path)
 
     # Labels from an older draw would make the progress count lie, so say so
     # rather than quietly ignoring them.
@@ -372,27 +639,111 @@ def main() -> None:
         print(f"  warning: {len(stray)} labelled ids are not in the current draw, e.g. {stray[:3]}")
 
     in_draw = {cid: record for cid, record in done.items() if cid in set(selected["conversation_id"])}
-    short = int(selected["is_short"].sum())
-    per_cluster = selected.groupby("cluster", dropna=False).size().sort_index()
-
-    n_exemplars = int(pool["is_exemplar"].sum())
     print(
-        f"label_cli: pool {len(pool):,} -> unread {len(candidates):,} "
-        f"(dropped {n_exemplars} read exemplars) -> selected {len(selected)} "
-        f"(labelled {len(in_draw)}, remaining {len(selected) - len(in_draw)})"
+        f"  progress:    {len(in_draw)}/{len(selected)} already answered, "
+        f"{len(selected) - len(in_draw)} remaining"
     )
-    print(f"  clusters:    " + " / ".join(f"c{c} {n}" for c, n in per_cluster.items()))
-    print(f"  length:      {short} under {SHORT_WORDS} words ({100.0 * short / len(selected):.1f}%)")
-    print(f"  guide:       {_display_path(GUIDE_PATH)}")
-    print(f"  writing to:  {_display_path(LABELS_PATH)}")
+    print(f"  writing to:  {_display_path(path)}")
 
     try:
-        added = label(selected, in_draw)
+        added = label(selected, in_draw, path, pass_number=pass_number)
     except KeyboardInterrupt:
         print("\n  stopped. Everything answered so far is saved; rerun to continue.")
         sys.exit(0)
 
     print(f"\n  done. {added} labelled this session, {len(in_draw) + added}/{len(selected)} total.")
+
+
+def run_pass1(pool: pd.DataFrame) -> None:
+    candidates = pool[~pool["is_exemplar"]]
+    selected = select(candidates)
+
+    short = int(selected["is_short"].sum())
+    per_cluster = selected.groupby("cluster", dropna=False).size().sort_index()
+    n_exemplars = int(pool["is_exemplar"].sum())
+
+    print(
+        f"label_cli: pool {len(pool):,} -> unread {len(candidates):,} "
+        f"(dropped {n_exemplars} read exemplars) -> selected {len(selected)}"
+    )
+    print(f"  clusters:    " + " / ".join(f"c{c} {n}" for c, n in per_cluster.items()))
+    print(f"  length:      {short} under {SHORT_WORDS} words ({100.0 * short / len(selected):.1f}%)")
+    print(f"  guide:       {_display_path(GUIDE_PATH)}")
+
+    run_session(selected, LABELS_PATH, pass_number=1)
+
+
+def run_relabel(pool: pd.DataFrame) -> None:
+    """The blind second pass. Reads pass 1 to stratify, then never again."""
+    if PASS2_PATH == LABELS_PATH:
+        raise AssertionError("the second pass must not write to the first pass's file")
+
+    intents = read_pass1_intents()
+    selected = select_relabel(pool, intents)
+
+    short = int(selected["is_short"].sum())
+    per_cluster = selected.groupby("cluster", dropna=False).size().sort_index()
+
+    print(
+        f"label_cli --relabel: labelled {len(intents)} -> selected {len(selected)} "
+        f"for a blind second pass (seed {RELABEL_SEED})"
+    )
+    print(f"  clusters:    " + " / ".join(f"c{c} {n}" for c, n in per_cluster.items()))
+    print(f"  length:      {short} under {SHORT_WORDS} words ({100.0 * short / len(selected):.1f}%)")
+    print(f"  guide:       {_display_path(GUIDE_PATH)}")
+    # The per-intent quota is NOT printed, though the per-cluster spread is.
+    # Cluster is a property of the text that pass 1 also had on screen; the
+    # intent breakdown is a pass-1 answer, and this session shows none of those.
+    print("  blind:       pass-1 labels are not read again or shown at any point")
+
+    run_session(selected, PASS2_PATH, pass_number=2)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+
+    # Mutually exclusive, and not merely for tidiness: --score puts pass-1
+    # labels on screen, which is the one thing a --relabel session must never
+    # do. Making them un-combinable in argparse means no invocation exists that
+    # could do both.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--relabel",
+        action="store_true",
+        help=f"blind second pass: re-label {N_RELABEL} already-labelled conversations "
+        f"into {PASS2_PATH.name} (pass-1 answers are never shown)",
+    )
+    mode.add_argument(
+        "--score",
+        action="store_true",
+        help="print Cohen's kappa between the two passes and the disagreements "
+        "(reads both files, writes nothing)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    # A missing labels file is an expected state -- the second pass has not been
+    # run yet, or neither has -- and the message already says which command
+    # fixes it. A traceback would bury that under a stack nobody needs.
+    try:
+        # Scoring reads two jsonl files and nothing else: no parquet, no
+        # embedding model, no clustering. build_pool() would cost ~10s and load
+        # MiniLM for a table that needs neither.
+        if args.score:
+            score_passes()
+            return
+
+        pool = build_pool()
+
+        if args.relabel:
+            run_relabel(pool)
+        else:
+            run_pass1(pool)
+    except FileNotFoundError as error:
+        sys.exit(f"\n{error}")
 
 
 if __name__ == "__main__":
