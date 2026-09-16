@@ -1,6 +1,6 @@
 PY := uv run python
 
-.PHONY: help all ingest threads conversations sample taxonomy diagnose baselines agent eval test clean
+.PHONY: help all ingest threads conversations sample taxonomy diagnose baselines agent judge judge-consistency eval test clean
 
 help:
 	@echo "make all            ingest -> threads -> conversations -> sample -> taxonomy"
@@ -12,6 +12,8 @@ help:
 	@echo "make diagnose       top-1 similarity spread over the golden set (offline, no key)"
 	@echo "make baselines      trivial + k-NN baselines over the golden set (offline, no key)"
 	@echo "make agent          run the agent over all 150 golden openings (LIVE, ~20 min)"
+	@echo "make judge          LLM-as-judge over the agent's 150 replies (LIVE, ~10 min)"
+	@echo "make judge-consistency  re-judge 20 replies twice; does the judge agree with itself?"
 	@echo "make eval           score agent + both baselines on the golden set (offline, no key)"
 	@echo "make test           run the test suite"
 	@echo "make clean          delete data/interim/ (derived data; regenerate with make ingest)"
@@ -49,6 +51,20 @@ baselines:
 # rule being correct. Live run against Gemini; replays from cache afterwards.
 agent:
 	$(PY) -m src.agent --golden --force-reply --out data/interim/agent_golden.jsonl
+
+# Groq scores the replies Gemini wrote -- a different model family, so the judge
+# is not grading its own output. Live run, ~150 calls at 4s apart, ~97K estimated
+# tokens against Groq's 200K/day. One system per run: all three would be ~290K and
+# the preflight refuses it. Replays from cache afterwards.
+judge:
+	$(PY) -m src.judge --system agent --out data/interim/judge_scores.jsonl
+
+# Does the judge give identical input the same score twice? TEMPERATURE is 0, but
+# temperature 0 is not a determinism guarantee on a hosted MoE model, and a mean
+# over 150 scores is only worth reporting if the answer here is yes. 40 calls,
+# ~26K tokens. Run it AFTER `make judge`; it refreshes only its own 40 rows.
+judge-consistency:
+	$(PY) -m src.judge --system agent --limit 20 --repeat 2 --out data/interim/judge_scores.jsonl
 
 # Scores jsonl already on disk -- no model, no embeddings, no key. CACHE_ONLY=1
 # is the guard, not a convenience: if this ever needs a key, the scoring stage

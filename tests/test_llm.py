@@ -22,7 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def isolated_env(tmp_path, monkeypatch):
     """Every test gets an empty cache dir, fake keys, and no CACHE_ONLY."""
     monkeypatch.setattr(llm, "CACHE_DIR", tmp_path / "llm")
-    monkeypatch.setattr(llm, "_last_gemini_call", None)
+    # Per-provider pacing clocks, emptied so one test's calls cannot make the
+    # next test's first call wait.
+    monkeypatch.setattr(llm, "_last_call", {})
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
     monkeypatch.delenv("CACHE_ONLY", raising=False)
@@ -245,6 +247,104 @@ def test_consecutive_live_gemini_calls_are_spaced(monkeypatch):
     before = len(slept)
     llm.complete(prompt="first", model="gemini-2.0-flash")
     assert len(slept) == before
+
+
+def test_consecutive_live_groq_calls_are_spaced(monkeypatch):
+    """Groq is paced too: 8K TPM binds well before its 30 RPM allowance."""
+    recording_post(
+        monkeypatch,
+        [FakeResponse(200, groq_body("one")), FakeResponse(200, groq_body("two"))],
+    )
+    slept = no_sleep(monkeypatch)
+
+    llm.complete(prompt="first", model="openai/gpt-oss-120b")
+    assert slept == [], "the first live call should not wait"
+
+    llm.complete(prompt="second", model="openai/gpt-oss-120b")
+    assert slept and slept[0] == pytest.approx(llm.GROQ_MIN_GAP_S, abs=0.1)
+
+
+def test_providers_are_paced_on_separate_clocks(monkeypatch):
+    """A Gemini call must not make the next Groq call wait. The quotas are separate."""
+    recording_post(
+        monkeypatch,
+        [FakeResponse(200, gemini_body("gen")), FakeResponse(200, groq_body("judged"))],
+    )
+    slept = no_sleep(monkeypatch)
+
+    llm.complete(prompt="write", model="gemini-2.0-flash")
+    llm.complete(prompt="grade", model="openai/gpt-oss-120b")
+
+    assert slept == [], "each provider's first call should go straight out"
+
+
+# --------------------------------------------------------------------------
+# variant: ask again instead of reading back the same answer
+# --------------------------------------------------------------------------
+
+
+def test_variant_zero_key_is_unchanged(monkeypatch):
+    """variant=0 must hash exactly the three original components.
+
+    This is what keeps the 300+ committed cache entries valid. If this test
+    fails, the whole cache has been invalidated and `make eval` needs a key.
+    """
+    import hashlib
+
+    expected = hashlib.sha256(
+        "\x00".join(["some-model", "a system prompt", "a prompt"]).encode("utf-8")
+    ).hexdigest()
+
+    assert llm._cache_key(prompt="a prompt", model="some-model", system="a system prompt") == expected
+
+
+def test_variant_changes_the_key_but_not_the_request(monkeypatch):
+    """The whole contract: different cache slot, byte-identical outgoing payload."""
+    calls = recording_post(
+        monkeypatch,
+        [FakeResponse(200, groq_body("4")), FakeResponse(200, groq_body("5"))],
+    )
+    no_sleep(monkeypatch)
+
+    key_0 = llm._cache_key(prompt="p", model="openai/gpt-oss-120b", system="s", variant=0)
+    key_1 = llm._cache_key(prompt="p", model="openai/gpt-oss-120b", system="s", variant=1)
+    assert key_0 != key_1
+
+    first = llm.complete(prompt="p", model="openai/gpt-oss-120b", system="s", variant=0)
+    second = llm.complete(prompt="p", model="openai/gpt-oss-120b", system="s", variant=1)
+
+    # Two live calls, not one cache hit: the repeat really asked again.
+    assert len(calls) == 2
+    assert (first, second) == ("4", "5")
+
+    # And it asked the SAME question. If the payloads differed, a score
+    # difference between repeats would be the prompt changing, not the judge
+    # disagreeing with itself, and the consistency number would be meaningless.
+    assert calls[0]["json"] == calls[1]["json"]
+
+
+def test_variant_is_recorded_in_the_cache_file(monkeypatch):
+    recording_post(monkeypatch, [FakeResponse(200, groq_body("4"))])
+    no_sleep(monkeypatch)
+
+    llm.complete(prompt="p", model="openai/gpt-oss-120b", system="s", variant=2)
+
+    key = llm._cache_key(prompt="p", model="openai/gpt-oss-120b", system="s", variant=2)
+    record = json.loads(llm._cache_path(key).read_text(encoding="utf-8"))
+    assert record["variant"] == 2
+    assert record["prompt"] == "p"
+
+
+def test_cached_response_probe_respects_variant(monkeypatch):
+    recording_post(monkeypatch, [FakeResponse(200, groq_body("4"))])
+    no_sleep(monkeypatch)
+
+    llm.complete(prompt="p", model="openai/gpt-oss-120b", system="s", variant=0)
+
+    assert llm.cached_response("p", "openai/gpt-oss-120b", "s", variant=0) == "4"
+    # The preflight must see the repeat as an uncached call, or it will
+    # under-count the spend of a --repeat run.
+    assert llm.cached_response("p", "openai/gpt-oss-120b", "s", variant=1) is None
 
 
 def test_groq_routing_uses_openai_shaped_request(monkeypatch):

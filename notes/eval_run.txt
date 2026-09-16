@@ -1,0 +1,74 @@
+CACHE_ONLY=1 uv run python -m src.evaluate
+evaluate: golden 150 -> agent 150 -> trivial 150 -> knn 150 (matched 150, lost 0)
+
+intent (9 classes, macro-averaged over all nine equally)
+--------------------------------------------------------
+system      accuracy  macro-F1  macro-F1 95% CI      kappa
+agent          0.740     0.716  [0.632, 0.780]       0.704
+trivial        0.213     0.039  [0.028, 0.049]       0.000
+knn            0.467     0.376  [0.310, 0.440]       0.378
+
+  CI: percentile bootstrap, 1000 resamples, seed 42, 2.5th/97.5th.
+  Resamples are paired -- all three systems are scored on the same 1000 draws.
+
+intent, per class (F1)
+----------------------
+class                support     agent   trivial       knn
+playback_library           6     0.435     0.000     0.000
+app_bug                   24     0.773     0.000     0.444
+content_issue             15     0.769     0.000     0.296
+account_access            17     0.811     0.000     0.688
+billing_dispute           13     0.750     0.000     0.400
+subscription_query        14     0.600     0.000     0.429
+how_to_question           10     0.700     0.000     0.000
+feature_request           32     0.847     0.352     0.588
+other                     19     0.757     0.000     0.542
+
+  agent    predicted every class at least once.
+  trivial  never predicted: playback_library, app_bug, content_issue, account_access, billing_dispute, subscription_query, how_to_question, other
+           precision on those is 0/0, reported as 0.000, not 1.000.
+  knn      predicted every class at least once.
+
+escalate (binary, scored on decision == escalate)
+-------------------------------------------------
+system           P       R      F1  F1 95% CI           fired   true
+agent        0.543   0.676   0.602  [0.453, 0.719]         46     37
+trivial      0.000   0.000   0.000  [0.000, 0.000]          0     37
+knn          0.000   0.000   0.000  [0.000, 0.000]          0     37
+
+  undefined precision (zero predicted positives): trivial, knn. Reported as 0.000.
+  Both baselines never escalate by construction -- that is the majority-class null.
+
+escalate by signal family (agent only)
+--------------------------------------
+family             P       R      F1  F1 95% CI           fired
+intent         0.806   0.676   0.735  [0.586, 0.833]         31
+similarity     0.118   0.054   0.074  [0.000, 0.185]         17
+text           1.000   0.054   0.103  [0.000, 0.256]          2
+
+  37 of 150 golden rows are labelled escalate.
+  Each row is that family alone as the whole rule, not its marginal contribution.
+  Baselines are omitted: they fire zero signals by construction.
+
+agent confusion matrix (rows = true, columns = predicted)
+---------------------------------------------------------
+  0  playback_library
+  1  app_bug
+  2  content_issue
+  3  account_access
+  4  billing_dispute
+  5  subscription_query
+  6  how_to_question
+  7  feature_request
+  8  other
+
+                          0    1    2    3    4    5    6    7    8  total
+0 playback_library        5    0    0    0    0    0    1    0    0      6
+1 app_bug                 3   17    0    1    0    1    0    0    2     24
+2 content_issue           3    0   10    0    0    0    0    1    1     15
+3 account_access          0    0    0   15    1    1    0    0    0     17
+4 billing_dispute         1    0    0    1    9    2    0    0    0     13
+5 subscription_query      0    0    0    2    1    9    2    0    0     14
+6 how_to_question         0    0    0    0    0    1    7    1    1     10
+7 feature_request         5    0    1    0    0    1    0   25    0     32
+8 other                   0    3    0    1    0    1    0    0   14     19

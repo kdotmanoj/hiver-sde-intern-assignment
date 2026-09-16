@@ -6,7 +6,7 @@ that through here buys three things:
 1. Every response is cached to disk by sha256(model + system + prompt), so an
    evaluation run replays from committed cache with no API key and no network.
 2. Free-tier rate limits are respected in exactly one place (4s between live
-   Gemini calls, exponential backoff on 429).
+   calls to each provider, on its own clock, plus exponential backoff on 429).
 3. Setting CACHE_ONLY=1 turns any cache miss into a loud error instead of a
    surprise API call.
 
@@ -48,6 +48,15 @@ MAX_OUTPUT_TOKENS = 1024
 # it without any token-bucket machinery.
 GEMINI_MIN_GAP_S = 4.0
 
+# Groq's free tier allows 30 requests/minute but only 8,000 tokens/minute, and
+# TPM binds first: a judge call is ~520 tokens, so 8000/520 is ~15 calls/minute,
+# half the RPM allowance. 4s between live calls keeps us under the tokens/minute
+# ceiling, which the request counter alone would sail straight past.
+GROQ_MIN_GAP_S = 4.0
+
+# The gap each provider is paced at, looked up by _wait_for_slot().
+MIN_GAP_S = {"gemini": GEMINI_MIN_GAP_S, "groq": GROQ_MIN_GAP_S}
+
 MAX_RETRIES = 5
 BACKOFF_BASE_S = 4.0
 BACKOFF_CAP_S = 64.0
@@ -56,8 +65,10 @@ TIMEOUT_S = 60
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Monotonic timestamp of the last live Gemini request, for the 4s gap.
-_last_gemini_call: float | None = None
+# Monotonic timestamp of the last live request PER PROVIDER, for the gap above.
+# Keyed by provider rather than global: a Gemini call should not make the judge
+# wait, and vice versa -- the two quotas are entirely separate.
+_last_call: dict[str, float] = {}
 
 
 class LLMError(RuntimeError):
@@ -68,7 +79,9 @@ class CacheOnlyError(LLMError):
     """CACHE_ONLY=1 is set and this prompt is not in the cache."""
 
 
-def cached_response(prompt: str, model: str, system: str | None = None) -> str | None:
+def cached_response(
+    prompt: str, model: str, system: str | None = None, variant: int = 0
+) -> str | None:
     """The cached completion for these inputs, or None if there is no cache entry.
 
     A read-only probe: it never calls a provider, never sleeps, and never writes.
@@ -77,16 +90,23 @@ def cached_response(prompt: str, model: str, system: str | None = None) -> str |
     the only way to find out is to start the run and hit the quota wall partway
     through, which is exactly the failure it is there to prevent.
     """
-    return _read_cache(_cache_key(prompt=prompt, model=model, system=system))
+    return _read_cache(_cache_key(prompt=prompt, model=model, system=system, variant=variant))
 
 
-def complete(prompt: str, model: str, system: str | None = None) -> str:
+def complete(prompt: str, model: str, system: str | None = None, variant: int = 0) -> str:
     """Return the model's completion for `prompt`, from cache when possible.
 
     A cache hit returns before any network code is reached: no key lookup, no
     sleep, no HTTP.
+
+    `variant` asks the same question again instead of reading the last answer.
+    It changes the CACHE KEY ONLY and never reaches the provider (see
+    _cache_key), so variant=1 sends byte-identical model, system and prompt to a
+    different cache slot. That is what makes src/judge.py's --repeat a
+    measurement: without it, judging identical input twice returns the identical
+    cached string and reports perfect self-consistency it has not observed.
     """
-    key = _cache_key(prompt=prompt, model=model, system=system)
+    key = _cache_key(prompt=prompt, model=model, system=system, variant=variant)
 
     cached = _read_cache(key)
     if cached is not None:
@@ -95,10 +115,11 @@ def complete(prompt: str, model: str, system: str | None = None) -> str:
     if os.environ.get("CACHE_ONLY") == "1":
         raise CacheOnlyError(
             f"CACHE_ONLY=1 but this prompt is not cached.\n"
-            f"  model:  {model}\n"
-            f"  key:    {key}\n"
-            f"  expect: {_cache_path(key)}\n"
-            f"  prompt: {prompt[:80]!r}"
+            f"  model:   {model}\n"
+            f"  variant: {variant}\n"
+            f"  key:     {key}\n"
+            f"  expect:  {_cache_path(key)}\n"
+            f"  prompt:  {prompt[:80]!r}"
         )
 
     provider = _provider(model)
@@ -107,7 +128,9 @@ def complete(prompt: str, model: str, system: str | None = None) -> str:
     else:
         response = _call_groq(prompt=prompt, model=model, system=system)
 
-    _write_cache(key, model=model, system=system, prompt=prompt, response=response)
+    _write_cache(
+        key, model=model, system=system, prompt=prompt, response=response, variant=variant
+    )
     return response
 
 
@@ -116,13 +139,21 @@ def complete(prompt: str, model: str, system: str | None = None) -> str:
 # --------------------------------------------------------------------------
 
 
-def _cache_key(prompt: str, model: str, system: str | None) -> str:
-    """sha256 over the three inputs that determine the response.
+def _cache_key(prompt: str, model: str, system: str | None, variant: int = 0) -> str:
+    """sha256 over the inputs that determine the response.
 
     The NUL separator means ("ab", "c") and ("a", "bc") cannot hash alike.
+
+    variant=0 hashes exactly the three original components and nothing else.
+    That is deliberate and load-bearing: appending "\\x000" unconditionally would
+    change every key in the project and invalidate the whole committed cache, so
+    a normal call keeps the key it has always had and only an explicit repeat
+    (variant >= 1) lands in a new file.
     """
-    payload = "\x00".join([model, system or "", prompt])
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    components = [model, system or "", prompt]
+    if variant:
+        components.append(str(variant))
+    return hashlib.sha256("\x00".join(components).encode("utf-8")).hexdigest()
 
 
 def _cache_path(key: str) -> Path:
@@ -137,13 +168,19 @@ def _read_cache(key: str) -> str | None:
     return record["response"]
 
 
-def _write_cache(key: str, model: str, system: str | None, prompt: str, response: str) -> None:
+def _write_cache(
+    key: str, model: str, system: str | None, prompt: str, response: str, variant: int = 0
+) -> None:
     """Write the record atomically, so an interrupted run cannot leave a half file."""
     record = {
         "model": model,
         "system": system,
         "prompt": prompt,
         "response": response,
+        # Recorded so a repeat is identifiable on disk. Two files with the same
+        # prompt and different responses are the self-consistency measurement,
+        # not a bug someone should go hunting for.
+        "variant": variant,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     path = _cache_path(key)
@@ -255,12 +292,12 @@ def _call_groq(prompt: str, model: str, system: str | None) -> str:
 
 def _post_with_backoff(url: str, headers: dict, payload: dict, provider: str) -> dict:
     """POST with exponential backoff on 429/5xx. Returns the parsed JSON body."""
-    global _last_gemini_call
-
     for attempt in range(MAX_RETRIES):
-        if provider == "gemini":
-            _wait_for_gemini_slot()
-            _last_gemini_call = time.monotonic()
+        # Both providers are paced, each against its own clock. A retry goes
+        # through here too, so a backoff sleep and the inter-call gap compose
+        # rather than racing each other.
+        _wait_for_slot(provider)
+        _last_call[provider] = time.monotonic()
 
         response = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT_S)
 
@@ -298,10 +335,13 @@ def _backoff_seconds(attempt: int, response) -> float:
     return min(BACKOFF_BASE_S * (2**attempt), BACKOFF_CAP_S)
 
 
-def _wait_for_gemini_slot() -> None:
-    """Sleep so that consecutive live Gemini requests are >= GEMINI_MIN_GAP_S apart."""
-    if _last_gemini_call is None:
+def _wait_for_slot(provider: str) -> None:
+    """Sleep so consecutive live requests to `provider` are >= its min gap apart."""
+    last = _last_call.get(provider)
+    if last is None:
         return
-    elapsed = time.monotonic() - _last_gemini_call
-    if elapsed < GEMINI_MIN_GAP_S:
-        time.sleep(GEMINI_MIN_GAP_S - elapsed)
+
+    gap = MIN_GAP_S[provider]
+    elapsed = time.monotonic() - last
+    if elapsed < gap:
+        time.sleep(gap - elapsed)
