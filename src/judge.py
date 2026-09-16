@@ -51,11 +51,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import random
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from src import llm
+from src import llm, metrics
 from src.agent import GOLDEN_LABELS, INTERIM
 from src.evaluate import PRODUCED_BY, SYSTEMS, read_jsonl
 from src.ingest import _display_path
@@ -761,6 +764,370 @@ def write_scores(path: Path, rows: list[dict], system: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# --human: score a sample of the same replies myself, blind
+# --------------------------------------------------------------------------
+#
+# The judge's means are only worth reporting if the judge agrees with a human on
+# the same replies. So: 60 of the agent's replies, shown with the customer
+# message and the same k=3 precedent the judge saw, and NOTHING else. No system
+# name, no judge score, no conversation_id -- seeing "the judge said 5" before
+# scoring is an anchor, and a human anchored on the judge measures the anchor.
+#
+# Sampling is stratified on the JUDGE's groundedness score. That is not circular:
+# the score decides which replies get shown, never what is shown. The reason is
+# coverage -- the judge gave 5 to 136 of 150 replies, so 60 drawn at random would
+# be ~54 fives and would say nothing about whether we agree where it matters. The
+# cost is that this sample is deliberately NOT representative, so the human MEANS
+# from it are not comparable to the judge's means over all 150. Agreement is what
+# it measures; that is all --judge-agreement reports.
+
+HUMAN_SCORES = INTERIM / "human_scores.jsonl"
+
+HUMAN_SAMPLE_SIZE = 60
+
+# CLAUDE.md fixes seed=42 project-wide. This one is 44 on purpose: the sample is
+# drawn from the same 150 conversations the golden set already sampled at 42, and
+# reusing the seed risks correlating the two draws.
+HUMAN_SEED = 44
+
+# The axis the sample is stratified on.
+STRATIFY_AXIS = "groundedness"
+
+# Scoring one reply at a time, in order, with no way back. A typo is fixable by
+# editing the file afterwards; going back mid-run is not worth the code.
+HUMAN_HELP = "1-5, or 'q' to stop (progress is saved after every reply)"
+
+
+def load_judge_rows(
+    path: Path = JUDGE_SCORES, system: str = "agent", repeat: int = 0
+) -> dict[int, dict]:
+    """conversation_id -> one system's judge scores, one repeat only.
+
+    Repeat 0 specifically. --repeat writes extra rows for the consistency probe,
+    and folding them in would weight those conversations twice in the sample and
+    twice again in the agreement.
+    """
+    if not path.exists():
+        sys.exit(f"missing {_display_path(path)} -- run `make judge` first.")
+
+    rows = read_jsonl(path)
+    wanted = [
+        row for row in rows if row["system"] == system and row.get("repeat", 0) == repeat
+    ]
+    if not wanted:
+        sys.exit(f"no rows for system={system!r} repeat={repeat} in {_display_path(path)}")
+
+    by_id = {int(row["conversation_id"]): row for row in wanted}
+    assert len(by_id) == len(wanted), f"duplicate conversation_id in {_display_path(path)}"
+    return by_id
+
+
+def stratified_sample(
+    judge_rows: dict[int, dict],
+    size: int = HUMAN_SAMPLE_SIZE,
+    seed: int = HUMAN_SEED,
+    axis: str = STRATIFY_AXIS,
+) -> list[int]:
+    """`size` conversation_ids, spread across the 1-5 values of `axis`.
+
+    The allocation rule, written out because it is a decision and not an
+    implementation detail:
+
+      1. Every score present gets an equal share of the sample (60/5 = 12).
+      2. A stratum with fewer rows than its share contributes all of them.
+      3. What that leaves over is redistributed to the strata that still have
+         rows, and the pass repeats until the sample is full or the data is.
+
+    On the current file -- 1 one, 5 twos, 3 threes, 5 fours, 136 fives -- that is
+    every rare reply plus 46 of the fives. The full range is covered, which is
+    the point: a random 60 would contain roughly one reply the judge scored below
+    4, and disagreement below 4 is the disagreement worth finding.
+
+    Rows whose score is None (a judge parse failure) belong to no stratum and are
+    excluded -- there is nothing to stratify them on and nothing to agree with.
+    """
+    strata: dict[int, list[int]] = {}
+    for conversation_id, row in sorted(judge_rows.items()):
+        score = row[axis]
+        if score is None:
+            continue
+        strata.setdefault(score, []).append(conversation_id)
+
+    present = sorted(strata)
+    n_available = sum(len(ids) for ids in strata.values())
+    quota = {score: 0 for score in present}
+
+    remaining = min(size, n_available)
+    while remaining > 0:
+        open_strata = [score for score in present if quota[score] < len(strata[score])]
+        if not open_strata:
+            break
+
+        # At least 1 each pass, so a sample smaller than the number of strata
+        # still terminates instead of looping on a share of zero.
+        share = max(1, remaining // len(open_strata))
+        for score in open_strata:
+            if remaining == 0:
+                break
+            take = min(share, len(strata[score]) - quota[score], remaining)
+            quota[score] += take
+            remaining -= take
+
+    rng = random.Random(seed)
+    picked: list[int] = []
+    for score in present:
+        picked.extend(rng.sample(strata[score], quota[score]))
+
+    # Shuffled, so the order I score them in carries no information about the
+    # judge's score. Sorted first, so the shuffle is reproducible.
+    picked.sort()
+    rng.shuffle(picked)
+
+    shown = ", ".join(f"{score}:{quota[score]}/{len(strata[score])}" for score in present)
+    print(
+        f"human sample: judged {len(judge_rows):,} -> stratified on {axis} "
+        f"({shown}) -> sampled {len(picked):,} (seed {seed})"
+    )
+    return picked
+
+
+def read_human_scores(path: Path = HUMAN_SCORES) -> list[dict]:
+    """Rows scored so far. Missing file is the normal first-run case, not an error."""
+    return read_jsonl(path) if path.exists() else []
+
+
+def _append_row(path: Path, row: dict) -> None:
+    """One row, flushed to disk before the next question is asked.
+
+    The point of --human is that it survives being interrupted. Buffering 60
+    rows and writing at the end would lose an hour of my own labelling to one
+    Ctrl-C, and there is no cache to replay a human from.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def show_case(case: JudgeCase, position: int, total: int) -> None:
+    """Print one case for scoring. Deliberately contains no judge score.
+
+    Same three blocks the judge is given, in the same order, so I am reading the
+    precedent the way it read the precedent.
+    """
+    print("")
+    print("=" * 72)
+    print(f"  {position}/{total}")
+    print("=" * 72)
+
+    if case.retrieved:
+        for n, item in enumerate(case.retrieved, start=1):
+            print("")
+            print(f"--- past conversation {n} ---")
+            print(f"Customer: {item['opening_text']}")
+            print(f"Spotify replied: {item['first_reply_text']}")
+    else:
+        print("")
+        print("(no similar past conversation was found)")
+
+    print("")
+    print("--- new message ---")
+    print(f"Customer: {case.text}")
+    print("")
+    print("--- draft reply ---")
+    print(case.reply)
+    print("")
+
+
+def ask_score(axis: str) -> int | None:
+    """One 1-5 score from stdin. None means stop here.
+
+    Re-asks on anything that is not a score. Ctrl-C and Ctrl-D both mean stop,
+    and stopping is a clean exit: everything answered so far is already on disk.
+    """
+    while True:
+        try:
+            answer = input(f"  {axis:<14} [{HUMAN_HELP}]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            return None
+
+        if answer in {"q", "quit"}:
+            return None
+
+        score = _as_score(answer)
+        if score is not None:
+            return score
+
+        print(f"    not a score -- give a whole number {SCORE_MIN}-{SCORE_MAX}, or 'q'.")
+
+
+def run_human(
+    system: str = "agent",
+    interim: Path = INTERIM,
+    judge_path: Path = JUDGE_SCORES,
+    out: Path = HUMAN_SCORES,
+    size: int = HUMAN_SAMPLE_SIZE,
+    seed: int = HUMAN_SEED,
+) -> None:
+    """Show the sample one at a time and record my scores. Resumable."""
+    judge_rows = load_judge_rows(judge_path, system=system)
+    sampled = stratified_sample(judge_rows, size=size, seed=seed)
+
+    cases = {case.conversation_id: case for case in build_cases(system, interim)}
+    missing = [conversation_id for conversation_id in sampled if conversation_id not in cases]
+    assert not missing, f"{len(missing)} sampled conversations have no reply in {system}_golden"
+
+    done = {
+        int(row["conversation_id"])
+        for row in read_human_scores(out)
+        if row.get("system") == system
+    }
+    todo = [conversation_id for conversation_id in sampled if conversation_id not in done]
+    n_done = len(sampled) - len(todo)
+
+    print(
+        f"human[{system}]: sampled {len(sampled):,} -> already scored {n_done:,} "
+        f"-> to score {len(todo):,}"
+    )
+    if not todo:
+        print("  nothing left. Run --judge-agreement to compare against the judge.")
+        return
+
+    print("")
+    print("  Replies are shown blind: no system name and no judge score, so that")
+    print("  the comparison afterwards measures agreement and not anchoring.")
+
+    n_scored = 0
+    for offset, conversation_id in enumerate(todo):
+        position = n_done + offset + 1
+        show_case(cases[conversation_id], position, len(sampled))
+
+        scores = {}
+        for axis in AXES:
+            score = ask_score(axis)
+            if score is None:
+                print("")
+                print(
+                    f"stopped at {position}/{len(sampled)}. {n_scored:,} reply(s) scored this "
+                    f"run, {n_done + n_scored:,}/{len(sampled):,} total."
+                )
+                print(f"  {_display_path(out)} is complete through the last full reply.")
+                print("  Re-run the same command to pick up where this left off.")
+                return
+            scores[axis] = score
+
+        _append_row(
+            out,
+            {
+                "system": system,
+                "conversation_id": conversation_id,
+                **scores,
+                "scored_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            },
+        )
+        n_scored += 1
+
+    print("")
+    print(
+        f"human[{system}]: scored {n_scored:,} this run -> "
+        f"{n_done + n_scored:,}/{len(sampled):,} total -> wrote {_display_path(out)}"
+    )
+    print("  Next: --judge-agreement")
+
+
+# --------------------------------------------------------------------------
+# --judge-agreement: do the judge and I give the same score?
+# --------------------------------------------------------------------------
+
+
+def judge_agreement(
+    system: str = "agent",
+    human_path: Path = HUMAN_SCORES,
+    judge_path: Path = JUDGE_SCORES,
+) -> dict:
+    """Kappa, weighted kappa and raw agreement per axis, over what I scored.
+
+    Three numbers because each answers a different question and they come apart:
+
+      kappa      how often we picked the SAME score, corrected for chance. Treats
+                 1-5 as five unordered labels, so judge 5 / human 4 counts as
+                 exactly as wrong as judge 5 / human 1.
+      qw kappa   how FAR APART we were, corrected for chance. Penalises a
+                 disagreement by the square of the distance, so 5-vs-4 costs
+                 1/16 of 5-vs-1. The right reading for an ordinal rubric.
+      raw agree  uncorrected exact-match rate. Printed because kappa on a skewed
+                 sample is hard to read alone: high raw agreement with low kappa
+                 means we agree mostly by both defaulting to the same score.
+
+    A big gap between the two kappas is itself the finding -- it means we rarely
+    picked the identical number but were almost always within a point.
+    """
+    if not human_path.exists():
+        sys.exit(f"missing {_display_path(human_path)} -- run `--human` first.")
+
+    human_rows = [row for row in read_jsonl(human_path) if row.get("system") == system]
+    if not human_rows:
+        sys.exit(f"no rows for system={system!r} in {_display_path(human_path)}")
+
+    # Last write wins, so a row re-scored by hand supersedes the earlier one
+    # instead of being silently double-counted.
+    human_by_id = {int(row["conversation_id"]): row for row in human_rows}
+    judge_by_id = load_judge_rows(judge_path, system=system)
+
+    paired = sorted(set(human_by_id) & set(judge_by_id))
+    n_unmatched = len(human_by_id) - len(paired)
+
+    print(
+        f"agreement[{system}]: human {len(human_by_id):,} -> matched to judge "
+        f"{len(paired):,} (lost {n_unmatched:,} with no judge score)"
+    )
+    if not paired:
+        sys.exit("  nothing to compare.")
+
+    labels = list(range(SCORE_MIN, SCORE_MAX + 1))
+    report: dict = {"system": system, "n": len(paired), "n_unmatched": n_unmatched}
+
+    print("")
+    print(
+        f"{'axis':<16}{'kappa':>10}{'qw kappa':>11}{'raw agree':>12}"
+        f"{'judge mean':>13}{'human mean':>13}"
+    )
+
+    for axis in AXES:
+        human_scores = [human_by_id[conversation_id][axis] for conversation_id in paired]
+        judge_scores = [judge_by_id[conversation_id][axis] for conversation_id in paired]
+
+        kappa = metrics.cohens_kappa(human_scores, judge_scores, labels)
+        weighted_kappa = metrics.quadratic_weighted_kappa(human_scores, judge_scores, labels)
+        raw = metrics.accuracy(human_scores, judge_scores)
+
+        report[axis] = {
+            "kappa": kappa,
+            "quadratic_weighted_kappa": weighted_kappa,
+            "raw_agreement": raw,
+            "judge_mean": sum(judge_scores) / len(judge_scores),
+            "human_mean": sum(human_scores) / len(human_scores),
+        }
+        print(
+            f"{axis:<16}{kappa:>10.3f}{weighted_kappa:>11.3f}{raw:>11.1%}"
+            f"{report[axis]['judge_mean']:>13.2f}{report[axis]['human_mean']:>13.2f}"
+        )
+
+    print("")
+    print(f"  {len(paired):,} replies scored by both.")
+    print("  kappa treats 1-5 as five unordered labels: judge 5 / human 4 is scored as badly")
+    print("  as judge 5 / human 1. qw kappa weights a disagreement by distance squared, so")
+    print("  5-vs-4 costs 1/16 of 5-vs-1. qw kappa much higher than kappa means we seldom")
+    print("  picked the same number but were almost always within a point.")
+    print("  The sample is stratified on the judge's groundedness, so it over-represents")
+    print("  low scores on purpose: the means above are means OVER THIS SAMPLE and are not")
+    print("  the judge's means over all 150. Agreement is the number this measures.")
+    return report
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -794,7 +1161,41 @@ def main() -> None:
         default=MAX_LIVE_CALLS,
         help=f"abort if the run would need more live calls than this (default {MAX_LIVE_CALLS})",
     )
+    parser.add_argument(
+        "--human",
+        action="store_true",
+        help=f"score a stratified sample of {HUMAN_SAMPLE_SIZE} replies by hand, blind. "
+        "Makes no API calls. Resumable -- re-run to continue.",
+    )
+    parser.add_argument(
+        "--judge-agreement",
+        action="store_true",
+        help="compare the hand scores against the judge's: Cohen's kappa and raw "
+        "agreement per axis. Makes no API calls.",
+    )
+    parser.add_argument("--human-out", type=Path, default=HUMAN_SCORES)
+    parser.add_argument("--human-size", type=int, default=HUMAN_SAMPLE_SIZE)
+    parser.add_argument("--human-seed", type=int, default=HUMAN_SEED)
     args = parser.parse_args()
+
+    # Both modes read files and make no calls, so neither goes near preflight.
+    if args.human and args.judge_agreement:
+        parser.error("--human and --judge-agreement are separate steps; run one at a time")
+
+    if args.human:
+        run_human(
+            system=args.system,
+            interim=args.interim,
+            judge_path=args.out,
+            out=args.human_out,
+            size=args.human_size,
+            seed=args.human_seed,
+        )
+        return
+
+    if args.judge_agreement:
+        judge_agreement(system=args.system, human_path=args.human_out, judge_path=args.out)
+        return
 
     if args.repeat < 1:
         parser.error(f"--repeat must be at least 1, got {args.repeat}")

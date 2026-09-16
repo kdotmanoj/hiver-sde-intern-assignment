@@ -231,6 +231,101 @@ def test_kappa_returns_zero_rather_than_dividing_by_zero_when_both_sides_are_con
 
 
 # --------------------------------------------------------------------------
+# quadratic weighted kappa
+# --------------------------------------------------------------------------
+#
+# A second worked fixture, separate from Y_TRUE/Y_PRED because those labels are
+# "a"/"b"/"c" -- deliberately unordered, and weighting them by how far apart they
+# sit in the list would be meaningless. These are an ordered 1-2-3 scale, which
+# is what the weighting is for.
+#
+# Four rows, three categories. Confusion matrix (rows = true, cols = pred):
+#
+#             pred 1   pred 2   pred 3     row
+#   true 1         1        0        0        1
+#   true 2         0        0        1        1
+#   true 3         1        0        1        2
+#   col            2        0        2     n = 4
+#
+# w[i][j] = (i - j)^2 / (k - 1)^2 = (i - j)^2 / 4, on indices 0, 1, 2:
+#
+#        [  0   1/4    1  ]
+#   w =  [ 1/4   0    1/4 ]
+#        [  1   1/4    0  ]
+#
+# numerator, over the four non-empty cells of O:
+#   (0,0) 0 * 1  +  (1,2) 1/4 * 1  +  (2,0) 1 * 1  +  (2,2) 0 * 1  =  5/4
+#
+# E[i][j] = row[i] * col[j] / n. Column 2 is empty, so only columns 1 and 3 of E
+# carry mass:
+#   E = [ 0.5  0  0.5 ]
+#       [ 0.5  0  0.5 ]
+#       [ 1.0  0  1.0 ]
+#
+# denominator, over the cells where w and E are both non-zero:
+#   (0,2) 1 * 0.5  +  (1,0) 1/4 * 0.5  +  (1,2) 1/4 * 0.5  +  (2,0) 1 * 1.0
+#   = 0.5 + 0.125 + 0.125 + 1.0 = 7/4
+#
+# kappa_w = 1 - (5/4) / (7/4) = 1 - 5/7 = 2/7 = 0.2857...
+
+ORD_TRUE = [1, 2, 3, 3]
+ORD_PRED = [1, 3, 3, 1]
+ORD_LABELS = [1, 2, 3]
+
+
+def test_quadratic_weighted_kappa_on_the_worked_ordinal_fixture():
+    assert metrics.quadratic_weighted_kappa(ORD_TRUE, ORD_PRED, ORD_LABELS) == pytest.approx(
+        2 / 7
+    )
+
+
+def test_quadratic_weighted_kappa_is_one_when_the_two_labellers_agree_everywhere():
+    # Every row lands on the diagonal, where w is 0, so the numerator is 0 and
+    # the whole thing is 1 - 0 = 1.
+    assert metrics.quadratic_weighted_kappa(ORD_TRUE, ORD_TRUE, ORD_LABELS) == pytest.approx(1.0)
+
+
+def test_weighting_rewards_near_misses_that_unweighted_kappa_treats_as_total_disagreement():
+    # This is the reason the function exists. Every row is off by exactly one
+    # point on a 1-5 scale -- the closest you can be without agreeing.
+    #
+    # Unweighted: p_o = 0, and kappa = (0 - p_e) / (1 - p_e) is therefore
+    # negative for any p_e > 0. It reads as "worse than chance" even though the
+    # two labellers are never more than one point apart.
+    #
+    # Weighted: every disagreement sits one step off the diagonal, the smallest
+    # non-zero cost there is (1/16 of the far corners), while the chance model
+    # spreads mass across the expensive cells too. So the ratio is small and
+    # kappa_w is strongly positive.
+    labels = [1, 2, 3, 4, 5]
+    y_true = [1, 2, 3, 4, 5]
+    y_pred = [2, 3, 4, 5, 4]
+
+    unweighted = metrics.cohens_kappa(y_true, y_pred, labels)
+    weighted = metrics.quadratic_weighted_kappa(y_true, y_pred, labels)
+
+    assert metrics.accuracy(y_true, y_pred) == 0.0
+    assert unweighted < 0.0
+    assert weighted > 0.5
+    assert weighted > unweighted
+
+
+def test_quadratic_weighted_kappa_returns_zero_rather_than_dividing_by_zero():
+    # Both sides said 3 every time. All the mass, observed and expected, sits in
+    # one diagonal cell where w is 0, so the ratio is 0/0. Same convention as
+    # cohens_kappa: report 0.0, because there is no defined answer.
+    y_true = [3, 3, 3]
+    assert metrics.quadratic_weighted_kappa(y_true, y_true, ORD_LABELS) == 0.0
+
+
+def test_quadratic_weighted_kappa_needs_at_least_two_labels():
+    # (k - 1)^2 is 0 with one label, so the weights are undefined. Raise rather
+    # than return a number nobody can interpret.
+    with pytest.raises(ValueError, match="at least 2 labels"):
+        metrics.quadratic_weighted_kappa([1, 1], [1, 1], [1])
+
+
+# --------------------------------------------------------------------------
 # percentile and bootstrap
 # --------------------------------------------------------------------------
 

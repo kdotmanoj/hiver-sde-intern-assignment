@@ -250,6 +250,65 @@ def cohens_kappa(y_true: Sequence, y_pred: Sequence, labels: Sequence) -> float:
     return (p_o - p_e) / (1 - p_e)
 
 
+def quadratic_weighted_kappa(y_true: Sequence, y_pred: Sequence, labels: Sequence) -> float:
+    """Cohen's kappa for an ORDERED scale, where a near miss costs less than a miss.
+
+        kappa_w = 1 - sum(w[i][j] * O[i][j]) / sum(w[i][j] * E[i][j])
+
+    O is the confusion matrix. E is what the matrix would look like if the two
+    labellers picked independently with the marginals they actually used --
+    E[i][j] = (rows truly i) * (rows labelled j) / n -- which is the same chance
+    model cohens_kappa's p_e uses, written as a full matrix instead of summed
+    down the diagonal. w is the cost of that cell:
+
+        w[i][j] = (i - j)^2 / (k - 1)^2
+
+    Zero on the diagonal, 1.0 in the far corners, and squared in between, so on a
+    1-5 scale a 5-vs-4 disagreement costs 1/16 of what 5-vs-1 costs. Unweighted
+    kappa charges both the same, which is right for intents -- "billing" is not
+    nearer to "playback" than to "account" -- and wrong for a 1-5 rubric, where
+    the judge scoring 5 against my 4 is close to agreeing and scoring 5 against
+    my 1 is not.
+
+    DISTANCE IS POSITION IN `labels`, NOT THE LABEL'S VALUE. labels=[1,2,3,4,5]
+    makes those the same thing. labels=[1,2,10] would not: 10 would sit one step
+    from 2, because this reads index 2 minus index 1. So `labels` must be passed
+    in ascending order and evenly spaced, and anything else is a caller bug this
+    function cannot see.
+
+    Returns 0.0 when the denominator is 0, on the same grounds as cohens_kappa's
+    p_e == 1.0 case. The denominator is a sum of non-negative terms, so it is
+    zero only when every cell with expected mass sits on the diagonal -- i.e.
+    both labellers used one single label and it was the same one. "Agreement
+    above chance" is not a defined quantity there.
+    """
+    n = _check_lengths(y_true, y_pred)
+
+    k = len(labels)
+    if k < 2:
+        raise ValueError(f"need at least 2 labels to weight a scale, got {k}")
+
+    observed = confusion_matrix(y_true, y_pred, labels)
+
+    row_totals = [sum(observed[i]) for i in range(k)]
+    col_totals = [sum(observed[i][j] for i in range(k)) for j in range(k)]
+
+    max_distance_squared = (k - 1) ** 2
+
+    numerator = 0.0
+    denominator = 0.0
+    for i in range(k):
+        for j in range(k):
+            weight = ((i - j) ** 2) / max_distance_squared
+            expected = (row_totals[i] * col_totals[j]) / n
+            numerator += weight * observed[i][j]
+            denominator += weight * expected
+
+    if denominator == 0.0:
+        return 0.0
+    return 1 - (numerator / denominator)
+
+
 # --------------------------------------------------------------------------
 # bootstrap confidence intervals
 # --------------------------------------------------------------------------
