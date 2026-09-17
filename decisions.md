@@ -600,10 +600,179 @@ No wasted calls either way: the reply prompt does not contain the escalation
 decision, so the cache key is identical and a later default run reuses the
 replies a forced run already cached.
 
-**49** Model switched to gemini-3.5-flash-lite after Gemini 3.6 Flash turned out to be 20 requests/day, not the ~1,000 the docs suggest. Discovered by exhausting it at call 21 of a 300-call run. Second time Gemini's own metadata proved unreliable (the first being the 404 on a model the list endpoint advertised). 22 cache entries under the old model are stranded and kept as a record.
+## Evaluation
 
-**50** MAX_LIVE_CALLS = 320 with a preflight that counts uncached calls before the loop starts. A daily quota doesn't queue — it fails, and the calls already spent stay spent. The preflight is an upper bound when the classify cache is cold, since the reply prompt contains the intent and can't be known in advance.
+**49. Generator model switched to `gemini-3.5-flash-lite`**
 
-Then start the baselines session. Don't wait for the run to finish — the two can proceed in parallel since baselines make no LLM calls.
+Gemini 3.6 Flash turned out to be 20 requests per day on the free tier, not the
+~1,000 the general documentation implies. Discovered by exhausting it at call 21
+of a 300-call golden run. This is the second time Gemini's own metadata proved
+unreliable — the first was the 404 on `gemini-2.5-flash`, a model its own
+models-list endpoint advertised as available. Switched to
+`gemini-3.5-flash-lite` at 500 RPD / 15 RPM. The 22 cache entries written under
+the old model are stranded (the cache key includes the model id) and kept in the
+repo as a record of the incident rather than deleted.
 
-the 0/0 convention, macro-F1 over all nine including never-predicted, paired bootstrap.
+**50. `MAX_LIVE_CALLS = 320` and a preflight that counts before it runs**
+
+A free daily quota does not queue when exceeded — it fails, and the calls
+already spent stay spent. So every live run first builds all its prompts, probes
+the cache to count how many are uncached, and aborts with a clear message if that
+exceeds the budget, before sending anything. The count is exact when the cache is
+warm and an upper bound when cold, because a reply prompt contains the classified
+intent and so cannot be known until classification has run.
+
+**51. Metrics hand-implemented, with an explicit 0/0 convention**
+
+Precision, recall, F1, macro-F1, accuracy, confusion matrix, Cohen's kappa and
+the bootstrap are all written from counting loops in `src/metrics.py`, no
+`sklearn.metrics`, each with a unit test whose arithmetic is written out in a
+comment so it can be checked on paper. CLAUDE.md requires this so I can derive
+every number on a whiteboard in the interview.
+
+The 0/0 case is defined rather than left to a library: when a class has no
+predicted positives its precision is 0.0 and the class is named in a reported
+`undefined_precision` list; same for recall with no true positives. This matters
+because both baselines predict zero positives on the escalate class and on
+several intent classes, so a silent 1.0 or a crash would either flatter them or
+break the comparison.
+
+**52. Macro-F1 averaged over all nine classes, including never-predicted ones**
+
+A class the system never predicts scores F1 0.0 and drags the mean down. That is
+the intended reading of "all nine classes weighted equally": ignoring a rare
+class is a failure, not a free pass. The alternative — averaging only over
+predicted classes — would let the trivial baseline look better by predicting
+fewer classes, which is backwards.
+
+**53. Paired bootstrap for confidence intervals**
+
+One seed-42 set of 1,000 resample index lists is generated once and reused across
+all three systems and every metric. Because the same resampled rows are scored
+for each system, the intervals are paired, so an overlap between two systems'
+CIs is interpretable as "these systems are not distinguishable on this sample"
+rather than being confounded by two independent resamplings. 2.5th and 97.5th
+percentiles, computed with an explicit linear-interpolation `percentile`, not
+numpy's.
+
+**54. Canned reply for the trivial baseline is a real SpotifyCares template**
+
+`CANNED_REPLY` is a genuine Spotify deflection ("...Could you send us a DM with
+your account's email address? We'll take a look backstage..."), not an invented
+strawman. "backstage" appears in 5,039 corpus first replies and "DM with your
+account" in 910, so the phrase is verifiably house style. A lazy production
+system would ship exactly this, so the trivial baseline scores however a generic
+DM deflection scores — which is the number the agent has to beat. A bad strawman
+would have flattered the agent.
+
+**55. k-NN baseline votes over the golden set with leave-one-out**
+
+The corpus has no intent labels; only the 150 golden examples do. So the
+label-driven k-NN baseline votes over the golden set itself, masking the query's
+own row (leave-one-out on byte-identical `opening_text`). This makes it an
+**optimistic ceiling for label-driven retrieval, not a fair peer**: it has seen
+human labels for near-identical messages, and the LLM classifier has seen none.
+Its bootstrap CI also understates uncertainty because the 150 predictions share
+an overlapping vote pool. Both facts are stated wherever its number appears.
+
+Compounding this, the taxonomy itself was defined by reading MiniLM cluster
+exemplars, so the classes are partly defined to be separable in the same
+embedding space the vote happens in. The k-NN number is therefore doubly
+favourable to itself and is reported as a ceiling, not a competitor.
+
+**56. Never-escalate is the escalation null for both baselines**
+
+`escalate=False` is the majority class (113/150), so never-escalating is the
+honest null and matches the trivial baseline. The k-NN-on-escalate variant was
+deliberately not built — letting the baseline borrow a similarity threshold
+would import the agent's own escalation rule into its control.
+
+## Judge
+
+**57. Judge model and family separation**
+
+The judge is Groq `openai/gpt-oss-120b`, a different model family from the Gemini
+generator, because a model rates text from its own family higher than equivalent
+text from another family. Groq's 200K tokens-per-day cap is the binding
+constraint, so the agent's 150 replies are judged first and the baselines only if
+budget allows. Judge prompts are kept under ~500 tokens for the same reason,
+though the longest (three retrieved replies plus rubric) reaches ~796 estimated
+tokens.
+
+**58. All systems judged against the agent's retrieved context**
+
+The trivial baseline retrieves nothing and k-NN uses only its top-1, so scoring
+each against its own context would make groundedness measure a different question
+per system. All three are therefore scored against the same k=3 neighbours the
+agent saw. This is the fairest available option but it is not neutral: it favours
+the agent on groundedness, because the agent's reply was generated from exactly
+that context and the baselines' were not. Stated as a limitation, not fixed — the
+alternative measures something different per system and is strictly worse.
+
+**59. `variant` parameter so the repeat-consistency check measures the judge, not the cache**
+
+The cache key is `sha256(model + system + prompt)`, so judging identical input
+twice would return the identical cached string and report variance 0.000 —
+measuring the cache, not the judge. A `variant` integer joins into the cache key
+(omitted when 0, so existing entries stay valid) to force a distinct cache slot
+per repeat, while the request payload sent to the provider stays byte-identical.
+This is what let `--repeat` measure that the judge is *not* fully deterministic
+at temperature 0 (groundedness disagreed with itself on 3/20 identical inputs).
+
+**60. Human reply scoring sample stratified on the judge's groundedness**
+
+The judge gave groundedness 5 to 136 of 150 replies, so a random 60 would be
+almost all 5s and measure nothing. The human sample instead takes an equal share
+per judge-groundedness score, capped at what exists (1/5/3/5/46 across scores
+1-5), so every reply the judge scored below 5 is included. This makes the sample
+deliberately non-representative: the human *means* are not comparable to the
+judge's means over all 150, but the *agreement* — the thing the sample exists to
+measure — is measured on exactly the cases where the judge committed to a score.
+
+Seed 44 here, not the project-wide 42, so this draw does not correlate with the
+seed-42 golden draw.
+
+**61. Unweighted kappa leads the judge-agreement report, weighted reported alongside**
+
+Cohen's kappa treats 1-5 as five unordered labels, so judge-5/human-4 scores as
+badly as judge-5/human-1 — conservative for an ordinal scale. Quadratic-weighted
+kappa penalises by squared distance instead. Both are reported. The report leads
+with unweighted because, on this data, weighting did **not** raise it
+(groundedness -0.048 unweighted, -0.012 weighted), which means the disagreements
+are not near-misses — agreement is genuinely at chance level, and the weighted
+number would only obscure that.
+
+## Golden set and labelling
+
+**62. Golden set drawn from the same 2,000-row taxonomy pool, with read exemplars excluded**
+
+The 150 golden examples are stratified across the k=8 clusters (seed 42), short
+messages oversampled. The 440 exemplars already exported to `clusters_k*.md` and
+read while writing the taxonomy are excluded from the draw, removing the direct
+contamination. A residual dependence remains and is stated in the report: the
+golden set comes from the same 2,000-row pool whose exemplars informed the
+taxonomy, so it is not fully independent of it. Embedding all 27,425 openings
+would remove this but at the cost of ~40MB of committed vectors.
+
+**63. Intra-annotator agreement re-label, blind, seed 43**
+
+50 of the 150 were re-labelled after an overnight gap, blind: the CLI drops the
+pass-1 intent, shuffles presentation order (so stratification does not leak the
+label by position), and asserts no pass-1 column survives into the session. The
+result, Cohen's kappa 0.862 (raw 44/50), is the ceiling any classifier can be
+expected to reach on this taxonomy — the four boundaries that caused the six
+disagreements (playback/app_bug, feature/content, how-to/account) are genuinely
+ambiguous, not annotation errors. Stratifying the re-label by the pass-1 label
+means pass 1 decides which conversations return, and the rare classes rest on 2-3
+examples each, so only the aggregate kappa is trustworthy.
+
+**64. Labelling errors corrected, taxonomy drift documented not hidden**
+
+During labelling, examples that violated the guide as already written (e.g.
+family-plan-invite messages sent to how_to instead of account_access) were
+re-queued and re-labelled, because those are errors. But the escalation rule was
+narrowed at example 19 (competitor mentions), and examples 1-18 were *not*
+retro-corrected — that early inconsistency is left in the set by design, so the
+intra-annotator kappa reflects real annotator noise rather than a tidied-up
+ceiling.
+

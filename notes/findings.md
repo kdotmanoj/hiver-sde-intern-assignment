@@ -44,6 +44,14 @@ Measured per brand below.
 `created_at` is in Twitter's own format (`Tue Oct 31 22:10:47 +0000 2017`) and
 needs an explicit `%a %b %d %H:%M:%S %z %Y`, not inference.
 
+**Spotify agent signatures are more common than a naive probe suggests.** 40,766
+of the SpotifyCares replies carry a trailing `/XX`: 39,851 two-letter and 915
+one-letter. An initial probe counting only end-of-text occurrences found 31,465,
+missing the 9,752 that sit immediately before a trailing `https://t.co/...`.
+
+32 merged replies are signed by more than one agent, meaning a split reply was
+finished by a different person than started it.
+
 ## Graph structure
 
 **798,197 threads**, reconstructed from the parent column.
@@ -185,18 +193,16 @@ downward: replies like "let's work together in dm here: `<url>`" survive at 4
 residual words, and form-fill redirects ("please fill in this form: `<url>`")
 are not in the pattern set.
 
-## Add to "Identifiers and text"
- 
-**Spotify agent signatures are more common than a naive probe suggests.** 40,766
-of the SpotifyCares replies carry a trailing `/XX`: 39,851 two-letter and 915
-one-letter. An initial probe counting only end-of-text occurrences found 31,465,
-missing the 9,752 that sit immediately before a trailing `https://t.co/...`.
- 
-32 merged replies are signed by more than one agent, meaning a split reply was
-finished by a different person than started it.
- 
-## Add a new section: "The SpotifyCares working set"
- 
+**A brand's own marketing handle can appear as a customer.** Conversation 2812 is
+rooted at `@115888`, a Spotify promotional account whose tweets carry
+`inbound=True`. At the schema level there is nothing distinguishing a promo post
+from a customer's opening message. The >20-tweet cap removes this particular one,
+but the general problem is unbounded: any brand handle flagged inbound will be
+read as a customer. Intent clusters and golden-set samples drawn from opening
+messages can therefore contain brand marketing copy.
+
+## The SpotifyCares working set
+
 28,380 conversations where SpotifyCares authored at least one outbound tweet;
 28,326 after dropping the 54 over 20 tweets. 91,827 tweets, 89,054 after the cap,
 87,677 turns after merging.
@@ -226,21 +232,102 @@ half-answers are heavily concentrated in exactly the field retrieval uses.
 every reply in them is a pure deflection. Kept with null `first_reply` fields.
 This is the usable-pool ceiling for retrieval: 27,425 conversations.
  
-## Add to "Dataset-level bias"
- 
-**A brand's own marketing handle can appear as a customer.** Conversation 2812 is
-rooted at `@115888`, a Spotify promotional account whose tweets carry
-`inbound=True`. At the schema level there is nothing distinguishing a promo post
-from a customer's opening message. The >20-tweet cap removes this particular one,
-but the general problem is unbounded: any brand handle flagged inbound will be
-read as a customer. Intent clusters and golden-set samples drawn from opening
-messages can therefore contain brand marketing copy.
-
 ## Pre-clustering intuition
 - Library/Playback clusters
 - Account access clusters
 - Billing issues
 
-agent macro-F1 0.716 [0.632, 0.780]; k-NN 0.376; trivial 0.039
-escalation: intent family alone F1 0.735, combined rule 0.602, similarity 0.074 (17 fires, precision 0.118), text 0.103 (2 fires)
-the similarity threshold was set from the similarity distribution, not validated against escalate labels; it does not predict escalation
+## The clustering did not produce the taxonomy
+
+k-means silhouette scores were 0.037-0.045 across k=5..12 with no elbow — no
+real cluster structure. Reading the exemplars confirmed it: a single cluster
+contained app bugs, playback problems, catalogue issues, how-to questions and
+feature requests. The clustering grouped messages by surface vocabulary, not by
+intent. The clusters were a reading aid; the taxonomy came from reading them,
+and that is stated wherever the taxonomy is described.
+
+## Intent classification results
+
+Agent macro-F1 0.716 [0.632, 0.780] (95% paired bootstrap), against k-NN 0.376
+and trivial 0.039. The agent roughly doubles the label-driven k-NN baseline and
+is ~18x the majority-class trivial baseline. Zero intent parse failures across
+150 classifications.
+
+The k-NN 0.376 is an optimistic ceiling, not a fair competitor: it votes over
+the golden labels themselves (leave-one-out), so it has seen human labels for
+near-identical messages while the LLM classifier has seen none, and the
+taxonomy was defined from the same embedding space it votes in.
+
+Intra-annotator agreement is kappa 0.862 (raw 44/50 on a blind re-label after
+an overnight gap). This is the ceiling: the agent's 0.716 should be read
+against 0.86, not against 1.0, because even the annotator cannot resolve the
+taxonomy's four hard boundaries consistently.
+
+## Intent failure modes
+
+40 intent disagreements between agent and gold. Split by hand into: ~3-4 where
+the model's label is defensible and the gold label is soft (not relabelled, to
+avoid inflating the score against the test set); the rest genuine model errors
+or genuinely-ambiguous boundary cases. Five recurring modes:
+
+1. Payment/money keyword capture (~6). Any message mentioning money, payment or
+   premium is pulled toward subscription_query or billing_dispute regardless of
+   the real problem. Examples: 93962 (app-update complaint -> subscription),
+   2752846 (payment UI frozen, an app bug -> subscription), 2141762, 1882069.
+2. Shuffle/algorithm complaints -> playback_library (~4). Feature complaints
+   about how shuffle behaves are read as "music will not play". Examples:
+   2731505, 1757064, 2902821, 1659869.
+3. Catalogue vs personal-library confusion (~5). content_issue and
+   playback_library swapped in both directions. Examples: 2908680, 1672172,
+   1480468, 925215, 408916. This is one of the four boundaries the
+   intra-annotator re-label also disagreed on, so it is genuinely hard, not
+   just a model failure.
+4. Vague/short messages -> confident wrong guess (~4). "I need help", "what's
+   going on", "why does Spotify mobile suck" get concrete labels the text does
+   not support. Examples: 1336506, 2919313, 2277222, 2037685.
+5. Annotator-model boundary disagreement (~3-4). Cases where the model is
+   defensibly right and the gold label is soft. Examples: 654600, 1476578,
+   223039, 1877698. Quantified by the intra-annotator kappa of 0.862 rather
+   than treated as pure model error.
+
+## Escalation results
+
+The escalation rule is effectively an intent lookup. Scored against the 150
+gold escalate labels: the intent family alone scores F1 0.735, but the
+combined rule scores only 0.602 — adding the other two families made it worse.
+The similarity family scores F1 0.074 (17 fires, precision 0.118, so ~2
+correct) and the text family scores 0.103 (2 fires).
+
+The cause is a methodological error stated plainly: `SIMILARITY_FLOOR` was set
+from the similarity distribution (just above its 10th percentile), never
+validated against whether low similarity actually predicts needing a human. It
+does not. Low retrieval similarity and "needs escalation" are close to
+uncorrelated on this set.
+
+The agent escalated 46/150 (30.7%) against 37 hand-labelled (24.7%), so it
+over-escalates by ~6 points.
+
+## Judge results
+
+Judge means on the agent's 150 replies: groundedness 4.80, correctness 4.97,
+tone 4.91. Correctness has almost no variance — nearly every reply scores 5 —
+so that axis cannot discriminate between systems and should not be read as
+evidence of quality. Tone is nearly as saturated. Only groundedness (range 2-5)
+does real work.
+
+The judge is not deterministic at temperature 0. Across 20 replies judged
+twice with byte-identical prompts, groundedness disagreed with itself on 3/20
+and tone on 2/20 (mean spread 0.150 and 0.100; correctness 20/20 identical).
+Any reported judge mean carries that self-inconsistency.
+
+## Judge-human agreement
+
+n=60, stratified on the judge's groundedness so the low scores are
+represented. Cohen's kappa -0.048/-0.014/-0.014 (grounded/correct/tone),
+quadratic-weighted -0.012/-0.040/-0.038, raw agreement 68/88/90%. Weighting for
+ordinality did not raise the numbers, so the disagreements are not near-misses
+concentrated at 5-vs-4 — agreement is genuinely at chance level. The cause is
+saturation: both the judge and the human cluster at 4-5, so high raw agreement
+is what two ceiling-bound raters produce by chance, and there is no spread for
+kappa to reward. The judge is usable as a coarse filter (it does catch the
+groundedness-2 cases of invented replies), not as a precise quality meter.
