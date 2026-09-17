@@ -265,7 +265,7 @@ taxonomy's four hard boundaries consistently.
 
 ## Intent failure modes
 
-40 intent disagreements between agent and gold. Split by hand into: ~3-4 where
+39 intent disagreements between agent and gold. Split by hand into: ~3-4 where
 the model's label is defensible and the gold label is soft (not relabelled, to
 avoid inflating the score against the test set); the rest genuine model errors
 or genuinely-ambiguous boundary cases. Five recurring modes:

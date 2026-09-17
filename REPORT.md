@@ -102,7 +102,7 @@ Judge-human agreement, n=60, Cohen's kappa: groundedness -0.048, correctness
 
 ## 4. Failure analysis
 
-Forty intent disagreements between the agent and the gold labels. Five
+Thirty-nine intent disagreements between the agent and the gold labels. Five
 recurring modes account for most of them.
 
 1. Payment and money keyword capture (about 6 cases). Any message mentioning
@@ -131,7 +131,7 @@ recurring modes account for most of them.
 
 - Annotator kappa ceiling is 0.862, so the agent's 0.716 reads against 0.86,
   not against 1.0.
-- About 3 to 4 of the 40 intent "errors" are soft-gold cases, not model
+- About 3 to 4 of the 39 intent "errors" are soft-gold cases, not model
   error, and were not relabelled, to avoid inflating the score against the
   test set.
 - The judge saturates on two of three axes (correctness 4.97, tone 4.91) and
@@ -153,9 +153,12 @@ recurring modes account for most of them.
 - The golden set is drawn from the same 2,000-row pool whose cluster
   exemplars were read to define the taxonomy, so it is not fully independent
   of it.
-- All three systems are judged for groundedness against the same context the
-  agent itself retrieved, which favors the agent since its reply was
-  generated from exactly that context.
+- The LLM judge was run only on the agent's 150 replies, because the judge's
+  daily token cap did not allow scoring the baselines as well. There is
+  therefore no judge-based quality comparison against the baselines: the
+  baseline comparison is intent macro-F1 only. The groundedness scores are the
+  agent's replies judged against the context the agent itself retrieved, which
+  is not a neutral test.
 - The k-NN baseline is doubly favoured: it votes on the labels it is scored
   against (leave-one-out over the golden set), and the taxonomy was built in
   the same embedding space it votes in. The real gap between the agent and a
@@ -169,7 +172,7 @@ recurring modes account for most of them.
   against the escalate labels instead of the similarity distribution
   (currently F1 0.074).
 - Fix payment and money keyword capture in the classifier prompt, the
-  largest single failure mode (about 6 of 40 disagreements).
+  largest single failure mode (about 6 of 39 disagreements).
 - Add a second annotator to get an inter-annotator kappa alongside the
   current intra-annotator 0.862.
 - Redesign the correctness and tone judge rubrics with harder anchors to
